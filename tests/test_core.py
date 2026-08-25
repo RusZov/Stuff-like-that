@@ -1,8 +1,34 @@
 import tempfile
 import unittest
 
-from dota_data import DotaData, FALLBACK_HERO_NAMES, parse_hero_stats
+from dota_data import (
+    DotaData,
+    FALLBACK_HERO_NAMES,
+    parse_valve_hero_list,
+    parse_valve_matchups,
+    parse_valve_plus_stats,
+)
 from engine import recommendations, strategy
+
+
+def fake_hero_payload():
+    return {
+        "result": {
+            "data": {
+                "heroes": [
+                    {
+                        "id": i,
+                        "name": f"npc_dota_hero_{i}",
+                        "name_loc": name,
+                        "name_english_loc": name,
+                        "primary_attr": i % 4,
+                        "complexity": 1 + (i % 3),
+                    }
+                    for i, name in enumerate(FALLBACK_HERO_NAMES, start=1)
+                ]
+            }
+        }
+    }
 
 
 class CoreTests(unittest.TestCase):
@@ -37,21 +63,56 @@ class CoreTests(unittest.TestCase):
             self.assertIn("ТАКТИКА", text)
             self.assertGreater(len(text), 100)
 
-    def test_parse_opendota_payload_and_winrate(self):
-        payload = []
-        for i, name in enumerate(FALLBACK_HERO_NAMES, start=1):
-            payload.append({"id": i, "localized_name": name, "roles": ["Carry"], "1_pick": 100, "1_win": 55, "img": "/x.png", "icon": "/i.png"})
-        parsed = parse_hero_stats(payload)
-        self.assertEqual(len(parsed), 127)
+    def test_parse_valve_roster_and_plus_stats(self):
+        heroes = parse_valve_hero_list(fake_hero_payload())
+        self.assertGreaterEqual(len(heroes), 127)
+        axe_id = heroes["Axe"].id
+        payload = {
+            "heroes": [
+                {
+                    "hero_id": hero.id,
+                    "hero_data_per_chunk": [
+                        {"rank_chunk": 0, "weeks": [{"win_percent": 5500, "pick_percent": 800, "ban_percent": 100}]}
+                    ],
+                }
+                for hero in heroes.values()
+                if hero.id is not None
+            ]
+        }
+        parsed = parse_valve_plus_stats(payload, heroes)
+        self.assertIsNotNone(axe_id)
         self.assertAlmostEqual(parsed["Axe"].win_rate, 0.55)
 
-    def test_matchup_cache_affects_score(self):
+    def test_valve_matchup_matrix_affects_score_without_fake_games(self):
+        heroes = parse_valve_hero_list(fake_hero_payload())
+        ursa_id = heroes["Ursa"].id
+        axe_id = heroes["Axe"].id
+        self.assertIsNotNone(ursa_id)
+        self.assertIsNotNone(axe_id)
+        rates = [0] * 127
+        rates[axe_id - 1] = 6000
+        payload = {
+            "ranked_hero_data": [
+                {
+                    "hero_id": ursa_id,
+                    "win_rate": 5200,
+                    "first_other_hero_id": 1,
+                    "ally_win_rate": [0] * 127,
+                    "enemy_win_rate": rates,
+                }
+            ]
+        }
+        matrix = parse_valve_matchups(payload, heroes)
+        self.assertAlmostEqual(matrix["Axe"]["Ursa"]["candidate_win_rate"], 0.60)
+        self.assertIsNone(matrix["Axe"]["Ursa"]["games"])
+
         with tempfile.TemporaryDirectory() as d:
             data = DotaData(d)
-            data.matchups = {"Axe": {"Ursa": {"games": 1000, "candidate_win_rate": 0.60}}}
+            data.heroes = heroes
+            data.matchups = matrix
             picks = recommendations(data, [], ["Axe"], "1 Carry", 127)
             by_name = {p.hero: p for p in picks}
-            self.assertIn("статистически хорош против Axe", by_name["Ursa"].why)
+            self.assertIn("Dota Plus", by_name["Ursa"].why)
 
 
 if __name__ == "__main__":
