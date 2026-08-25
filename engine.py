@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from dota_data import DotaData, Hero, POSITION_POOLS
 
+
 @dataclass(frozen=True)
 class Pick:
     hero: str
@@ -36,19 +37,23 @@ def score_hero(data: DotaData, hero: Hero, allies: list[str], enemies: list[str]
         if meta >= 2:
             reasons.append(f"хорошая общая статистика ({hero.win_rate:.1%})")
 
-    matchup_points = []
+    matchup_points: list[tuple[float, str, float, int | None]] = []
     for enemy in enemies:
         matchup = data.matchup(hero.name, enemy)
         if matchup:
             wr, games = matchup
-            if games >= 20:
+            # Valve Dota Plus exposes the rate but not the sample size in this endpoint.
+            if games is None or games >= 20:
                 pts = max(-7.0, min(7.0, (wr - 0.50) * 50.0))
                 score += pts
                 matchup_points.append((pts, enemy, wr, games))
     if matchup_points:
         best = max(matchup_points, key=lambda x: x[0])
         if best[0] > 0.5:
-            reasons.append(f"статистически хорош против {best[1]} ({best[2]:.1%}, {best[3]} игр)")
+            if best[3] is None:
+                reasons.append(f"хорош по Dota Plus против {best[1]} ({best[2]:.1%})")
+            else:
+                reasons.append(f"статистически хорош против {best[1]} ({best[2]:.1%}, {best[3]} игр)")
         worst = min(matchup_points, key=lambda x: x[0])
         if worst[0] < -1.5:
             reasons.append(f"есть риск против {worst[1]} ({worst[2]:.1%})")
