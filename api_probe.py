@@ -7,6 +7,9 @@ import urllib.request
 URLS = [
     "https://api.opendota.com/api/heroStats",
     "https://api.opendota.com/api/heroes/2/matchups",
+    "https://www.dota2.com/datafeed/herolist?language=english",
+    "https://www.dota2.com/webapi/IDOTA2Plus/GetPlusStatsData/v001",
+    "https://www.dota2.com/webapi/IDOTA2Plus/GetPlusHeroAllyAndEnemyData/v001",
 ]
 
 
@@ -19,7 +22,7 @@ def probe(url: str) -> None:
             print(f"{url} -> HTTP {response.status}; content-type={ctype}; bytes={len(raw)}")
             try:
                 payload = json.loads(raw.decode("utf-8"))
-                print(f"  JSON type: {type(payload).__name__}; size={len(payload) if hasattr(payload, '__len__') else 'n/a'}")
+                print(f"  JSON type: {type(payload).__name__}; top-level={list(payload)[:8] if isinstance(payload, dict) else 'array'}")
             except Exception as exc:
                 print(f"  JSON decode failed: {exc}")
     except urllib.error.HTTPError as exc:
