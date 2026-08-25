@@ -3,13 +3,19 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable
 
-OPEN_DOTA = "https://api.opendota.com/api"
+VALVE_HERO_LIST = "https://www.dota2.com/datafeed/herolist?language=english"
+VALVE_PLUS_STATS = "https://www.dota2.com/webapi/IDOTA2Plus/GetPlusStatsData/v001"
+VALVE_PLUS_MATCHUPS = "https://www.dota2.com/webapi/IDOTA2Plus/GetPlusHeroAllyAndEnemyData/v001"
 STEAM_CDN = "https://cdn.cloudflare.steamstatic.com"
+
+# OpenDota is kept only as a fallback provider. It is not the primary source.
+OPEN_DOTA_HERO_STATS = "https://api.opendota.com/api/heroStats"
 
 FALLBACK_HERO_NAMES = [
     "Abaddon", "Alchemist", "Ancient Apparition", "Anti-Mage", "Arc Warden", "Axe",
@@ -48,7 +54,15 @@ PUSHERS = {"Beastmaster", "Broodmother", "Chen", "Clinkz", "Death Prophet", "Dra
 DURABLE = {"Abaddon", "Axe", "Brewmaster", "Bristleback", "Centaur Warrunner", "Dawnbreaker", "Doom", "Dragon Knight", "Huskar", "Kunkka", "Legion Commander", "Mars", "Necrophos", "Night Stalker", "Ogre Magi", "Primal Beast", "Slardar", "Tidehunter", "Timbersaw", "Underlord", "Undying", "Wraith King"}
 ESCAPE = {"Anti-Mage", "Bounty Hunter", "Broodmother", "Clinkz", "Dark Seer", "Ember Spirit", "Faceless Void", "Hoodwink", "Kez", "Mirana", "Monkey King", "Morphling", "Pangolier", "Phantom Assassin", "Phantom Lancer", "Puck", "Queen of Pain", "Riki", "Slark", "Storm Spirit", "Timbersaw", "Void Spirit", "Weaver", "Windranger"}
 
-SPECIAL_SLUGS = {"Anti-Mage": "antimage", "Centaur Warrunner": "centaur", "Clockwerk": "rattletrap", "Doom": "doom_bringer", "Io": "wisp", "Lifestealer": "life_stealer", "Nature's Prophet": "furion", "Necrophos": "necrolyte", "Outworld Destroyer": "obsidian_destroyer", "Queen of Pain": "queenofpain", "Shadow Fiend": "nevermore", "Timbersaw": "shredder", "Underlord": "abyssal_underlord", "Windranger": "windrunner", "Wraith King": "skeleton_king"}
+SPECIAL_SLUGS = {
+    "Anti-Mage": "antimage", "Centaur Warrunner": "centaur", "Clockwerk": "rattletrap",
+    "Doom": "doom_bringer", "Io": "wisp", "Lifestealer": "life_stealer",
+    "Nature's Prophet": "furion", "Necrophos": "necrolyte", "Outworld Destroyer": "obsidian_destroyer",
+    "Queen of Pain": "queenofpain", "Shadow Fiend": "nevermore", "Timbersaw": "shredder",
+    "Underlord": "abyssal_underlord", "Windranger": "windrunner", "Wraith King": "skeleton_king",
+}
+
+ATTRS = {0: "str", 1: "agi", 2: "int", 3: "all"}
 
 
 def hero_slug(name: str) -> str:
@@ -57,14 +71,22 @@ def hero_slug(name: str) -> str:
 
 def fallback_roles(name: str) -> tuple[str, ...]:
     roles: list[str] = []
-    if name in POSITION_POOLS["1 Carry"]: roles.append("Carry")
-    if name in POSITION_POOLS["4 Support"] or name in POSITION_POOLS["5 Hard Support"]: roles.append("Support")
-    if name in DISABLERS: roles.append("Disabler")
-    if name in INITIATORS: roles.append("Initiator")
-    if name in DURABLE: roles.append("Durable")
-    if name in PUSHERS: roles.append("Pusher")
-    if name in ESCAPE: roles.append("Escape")
-    if name in POSITION_POOLS["2 Mid"] and "Carry" not in roles: roles.append("Nuker")
+    if name in POSITION_POOLS["1 Carry"]:
+        roles.append("Carry")
+    if name in POSITION_POOLS["4 Support"] or name in POSITION_POOLS["5 Hard Support"]:
+        roles.append("Support")
+    if name in DISABLERS:
+        roles.append("Disabler")
+    if name in INITIATORS:
+        roles.append("Initiator")
+    if name in DURABLE:
+        roles.append("Durable")
+    if name in PUSHERS:
+        roles.append("Pusher")
+    if name in ESCAPE:
+        roles.append("Escape")
+    if name in POSITION_POOLS["2 Mid"] and "Carry" not in roles:
+        roles.append("Nuker")
     return tuple(roles or ["Nuker"])
 
 
@@ -73,10 +95,8 @@ class Hero:
     id: int | None
     name: str
     roles: tuple[str, ...]
-    img: str = ""
-    icon: str = ""
     primary_attr: str = ""
-    attack_type: str = ""
+    complexity: int | None = None
     win_rate: float | None = None
 
     @property
@@ -88,120 +108,214 @@ def fallback_heroes() -> dict[str, Hero]:
     return {name: Hero(None, name, fallback_roles(name)) for name in FALLBACK_HERO_NAMES}
 
 
-def _public_win_rate(row: dict) -> float | None:
-    wins = picks = 0
-    for bracket in range(1, 9):
-        p, w = row.get(f"{bracket}_pick"), row.get(f"{bracket}_win")
-        if isinstance(p, (int, float)) and isinstance(w, (int, float)):
-            picks += p; wins += w
-    return wins / picks if picks > 0 else None
+def parse_valve_hero_list(payload: object) -> dict[str, Hero]:
+    try:
+        rows = payload["result"]["data"]["heroes"]  # type: ignore[index]
+    except Exception as exc:
+        raise ValueError("Valve herolist: unexpected JSON shape") from exc
+    if not isinstance(rows, list):
+        raise ValueError("Valve herolist: heroes is not an array")
 
-
-def parse_hero_stats(payload: object) -> dict[str, Hero]:
-    if not isinstance(payload, list):
-        raise ValueError("OpenDota heroStats: expected JSON array")
     result: dict[str, Hero] = {}
-    for row in payload:
-        if not isinstance(row, dict): continue
-        name, hero_id = row.get("localized_name"), row.get("id")
-        if not name or not isinstance(hero_id, int): continue
-        result[str(name)] = Hero(hero_id, str(name), tuple(str(x) for x in row.get("roles", []) if x), str(row.get("img") or ""), str(row.get("icon") or ""), str(row.get("primary_attr") or ""), str(row.get("attack_type") or ""), _public_win_rate(row))
-    if len(result) < 100:
-        raise ValueError(f"OpenDota heroStats: suspiciously small hero list ({len(result)})")
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        hero_id = row.get("id")
+        name = row.get("name_loc") or row.get("name_english_loc")
+        if not isinstance(hero_id, int) or not isinstance(name, str) or not name:
+            continue
+        result[name] = Hero(
+            id=hero_id,
+            name=name,
+            roles=fallback_roles(name),
+            primary_attr=ATTRS.get(row.get("primary_attr"), ""),
+            complexity=row.get("complexity") if isinstance(row.get("complexity"), int) else None,
+        )
+
+    if len(result) < 120:
+        raise ValueError(f"Valve herolist: suspiciously small roster ({len(result)})")
+    for name, hero in fallback_heroes().items():
+        result.setdefault(name, hero)
     return result
+
+
+def parse_valve_plus_stats(payload: object, heroes: dict[str, Hero]) -> dict[str, Hero]:
+    if not isinstance(payload, dict) or not isinstance(payload.get("heroes"), list):
+        raise ValueError("Valve GetPlusStatsData: unexpected JSON shape")
+    by_id = {hero.id: name for name, hero in heroes.items() if hero.id is not None}
+    updated = dict(heroes)
+
+    for row in payload["heroes"]:
+        if not isinstance(row, dict):
+            continue
+        name = by_id.get(row.get("hero_id"))
+        chunks = row.get("hero_data_per_chunk")
+        if not name or not isinstance(chunks, list):
+            continue
+        chunk = next((c for c in chunks if isinstance(c, dict) and c.get("rank_chunk") == 0), None)
+        if chunk is None:
+            chunk = next((c for c in chunks if isinstance(c, dict)), None)
+        if not isinstance(chunk, dict) or not isinstance(chunk.get("weeks"), list) or not chunk["weeks"]:
+            continue
+        # Valve returns the current/recent week first. Use the first valid record.
+        week = next((w for w in chunk["weeks"] if isinstance(w, dict) and isinstance(w.get("win_percent"), (int, float))), None)
+        if week is None:
+            continue
+        win_rate = float(week["win_percent"]) / 10000.0
+        if 0.0 <= win_rate <= 1.0:
+            updated[name] = replace(updated[name], win_rate=win_rate)
+    return updated
+
+
+def parse_valve_matchups(payload: object, heroes: dict[str, Hero]) -> dict[str, dict[str, dict[str, object]]]:
+    if not isinstance(payload, dict) or not isinstance(payload.get("ranked_hero_data"), list):
+        raise ValueError("Valve GetPlusHeroAllyAndEnemyData: unexpected JSON shape")
+
+    id_to_name = {hero.id: name for name, hero in heroes.items() if hero.id is not None}
+    matrix: dict[str, dict[str, dict[str, object]]] = {}
+
+    # Each row describes one candidate hero. enemy_win_rate values correspond to
+    # consecutive other-hero IDs starting at first_other_hero_id. Invalid/gap IDs
+    # are simply ignored because they are absent from id_to_name.
+    for row in payload["ranked_hero_data"]:
+        if not isinstance(row, dict):
+            continue
+        candidate_name = id_to_name.get(row.get("hero_id"))
+        first_other = row.get("first_other_hero_id")
+        rates = row.get("enemy_win_rate")
+        if not candidate_name or not isinstance(first_other, int) or not isinstance(rates, list):
+            continue
+        for offset, raw_rate in enumerate(rates):
+            enemy_name = id_to_name.get(first_other + offset)
+            if not enemy_name or enemy_name == candidate_name or not isinstance(raw_rate, (int, float)):
+                continue
+            wr = float(raw_rate) / 10000.0
+            if not 0.0 < wr < 1.0:
+                continue
+            matrix.setdefault(enemy_name, {})[candidate_name] = {
+                "candidate_win_rate": wr,
+                "games": None,
+                "source": "Valve Dota Plus",
+            }
+    return matrix
 
 
 class DotaData:
     def __init__(self, root: Path | str = "data") -> None:
-        self.root = Path(root); self.root.mkdir(parents=True, exist_ok=True)
-        self.hero_cache = self.root / "hero_stats.json"
-        self.matchup_cache = self.root / "matchups.json"
-        self.heroes = self._load_cached_heroes()
-        self.matchups = self._load_json(self.matchup_cache, {})
+        self.root = Path(root)
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.hero_cache = self.root / "valve_heroes.json"
+        self.stats_cache = self.root / "valve_plus_stats.json"
+        self.matchup_cache = self.root / "valve_matchups.json"
+        self.heroes = fallback_heroes()
+        self.matchups: dict[str, dict[str, dict[str, object]]] = {}
+        self._using_valve_cache = False
+        self._load_caches()
 
     @staticmethod
     def _load_json(path: Path, default):
-        try: return json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError): return default
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return default
 
     @staticmethod
     def _atomic_json(path: Path, data: object) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, temp_name = tempfile.mkstemp(prefix=path.name, suffix=".tmp", dir=path.parent)
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f: json.dump(data, f, ensure_ascii=False, indent=2)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
             os.replace(temp_name, path)
         finally:
-            if os.path.exists(temp_name): os.unlink(temp_name)
+            if os.path.exists(temp_name):
+                os.unlink(temp_name)
 
-    def _load_cached_heroes(self) -> dict[str, Hero]:
-        cached = self._load_json(self.hero_cache, None)
-        if cached is not None:
+    def _load_caches(self) -> None:
+        hero_payload = self._load_json(self.hero_cache, None)
+        if hero_payload is not None:
             try:
-                parsed = parse_hero_stats(cached)
-                for name, hero in fallback_heroes().items(): parsed.setdefault(name, hero)
-                return parsed
-            except ValueError: pass
-        return fallback_heroes()
+                self.heroes = parse_valve_hero_list(hero_payload)
+                self._using_valve_cache = True
+            except ValueError:
+                self.heroes = fallback_heroes()
+
+        stats_payload = self._load_json(self.stats_cache, None)
+        if stats_payload is not None:
+            try:
+                self.heroes = parse_valve_plus_stats(stats_payload, self.heroes)
+                self._using_valve_cache = True
+            except ValueError:
+                pass
+
+        cached_matchups = self._load_json(self.matchup_cache, {})
+        if isinstance(cached_matchups, dict):
+            self.matchups = cached_matchups
 
     @property
     def source(self) -> str:
-        return "OpenDota cache" if any(h.id is not None for h in self.heroes.values()) else "offline fallback"
+        return "Valve dota2.com cache" if self._using_valve_cache else "offline fallback"
 
-    def _get_json(self, url: str, timeout: float = 12.0):
-        req = urllib.request.Request(url, headers={"User-Agent": "Dota2Coach/1.0"})
+    @staticmethod
+    def _get_json(url: str, timeout: float = 15.0):
+        req = urllib.request.Request(url, headers={"User-Agent": "Dota2Coach/2.0"})
         with urllib.request.urlopen(req, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
+            if response.status != 200:
+                raise RuntimeError(f"HTTP {response.status}: {url}")
+            raw = response.read()
+            return json.loads(raw.decode("utf-8"))
 
-    def sync_heroes(self, timeout: float = 12.0) -> int:
-        payload = self._get_json(f"{OPEN_DOTA}/heroStats", timeout)
-        parsed = parse_hero_stats(payload)
-        for name, hero in fallback_heroes().items(): parsed.setdefault(name, hero)
-        self._atomic_json(self.hero_cache, payload); self.heroes = parsed
+    def sync_heroes(self, timeout: float = 15.0) -> int:
+        hero_payload = self._get_json(VALVE_HERO_LIST, timeout)
+        heroes = parse_valve_hero_list(hero_payload)
+
+        stats_payload = self._get_json(VALVE_PLUS_STATS, timeout)
+        heroes = parse_valve_plus_stats(stats_payload, heroes)
+
+        self._atomic_json(self.hero_cache, hero_payload)
+        self._atomic_json(self.stats_cache, stats_payload)
+        self.heroes = heroes
+        self._using_valve_cache = True
         return len(self.heroes)
 
-    def sync_matchups(self, enemy_names: Iterable[str], timeout: float = 12.0) -> int:
-        ids_to_names = {h.id: h.name for h in self.heroes.values() if h.id is not None}
-        updated = 0
-        for enemy_name in dict.fromkeys(enemy_names):
-            enemy = self.heroes.get(enemy_name)
-            if not enemy or enemy.id is None: continue
-            payload = self._get_json(f"{OPEN_DOTA}/heroes/{enemy.id}/matchups", timeout)
-            if not isinstance(payload, list): continue
-            values = {}
-            for row in payload:
-                if not isinstance(row, dict): continue
-                candidate = ids_to_names.get(row.get("hero_id")); games = row.get("games_played", 0); enemy_wins = row.get("wins", 0)
-                if candidate and isinstance(games, (int, float)) and games > 0 and isinstance(enemy_wins, (int, float)):
-                    values[candidate] = {"games": int(games), "candidate_win_rate": float(1.0 - (enemy_wins / games))}
-            if values: self.matchups[enemy_name] = values; updated += 1
-        if updated: self._atomic_json(self.matchup_cache, self.matchups)
-        return updated
+    def sync_matchups(self, enemy_names: Iterable[str], timeout: float = 15.0) -> int:
+        payload = self._get_json(VALVE_PLUS_MATCHUPS, timeout)
+        matrix = parse_valve_matchups(payload, self.heroes)
+        self.matchups = matrix
+        self._atomic_json(self.matchup_cache, matrix)
+        requested = list(dict.fromkeys(enemy_names))
+        return sum(1 for enemy in requested if matrix.get(enemy))
 
-    def matchup(self, candidate: str, enemy: str) -> tuple[float, int] | None:
+    def matchup(self, candidate: str, enemy: str) -> tuple[float, int | None] | None:
         row = self.matchups.get(enemy, {}).get(candidate)
-        if not isinstance(row, dict): return None
-        wr, games = row.get("candidate_win_rate"), row.get("games")
-        if not isinstance(wr, (int, float)) or not isinstance(games, int): return None
-        return float(wr), games
+        if not isinstance(row, dict):
+            return None
+        wr = row.get("candidate_win_rate")
+        games = row.get("games")
+        if not isinstance(wr, (int, float)):
+            return None
+        return float(wr), games if isinstance(games, int) else None
 
     def portrait_url(self, hero: Hero) -> str:
-        if hero.img: return STEAM_CDN + hero.img.split("?", 1)[0]
         return f"{STEAM_CDN}/apps/dota2/images/dota_react/heroes/{hero.slug}.png"
 
-    def download_portraits(self, names: Iterable[str] | None = None, timeout: float = 12.0) -> tuple[int, list[str]]:
-        folder = Path("assets/heroes"); folder.mkdir(parents=True, exist_ok=True)
-        targets = list(names) if names is not None else sorted(self.heroes)
-        ok, failed = 0, []
-        for name in targets:
-            hero = self.heroes.get(name)
-            if not hero: continue
-            path = folder / f"{hero.slug}.png"
-            if path.exists() and path.stat().st_size > 1000: ok += 1; continue
+    def download_portraits(self, output: Path | str = "assets/heroes", timeout: float = 15.0) -> int:
+        out = Path(output)
+        out.mkdir(parents=True, exist_ok=True)
+        count = 0
+        for hero in self.heroes.values():
+            target = out / f"{hero.slug}.png"
+            if target.exists() and target.stat().st_size > 1000:
+                count += 1
+                continue
             try:
-                req = urllib.request.Request(self.portrait_url(hero), headers={"User-Agent": "Dota2Coach/1.0"})
-                with urllib.request.urlopen(req, timeout=timeout) as r: data = r.read()
-                if len(data) < 1000: raise ValueError("image response too small")
-                path.write_bytes(data); ok += 1
-            except Exception: failed.append(name)
-        return ok, failed
+                req = urllib.request.Request(self.portrait_url(hero), headers={"User-Agent": "Dota2Coach/2.0"})
+                with urllib.request.urlopen(req, timeout=timeout) as response:
+                    data = response.read()
+                if len(data) < 1000:
+                    continue
+                target.write_bytes(data)
+                count += 1
+            except (OSError, urllib.error.URLError, TimeoutError):
+                continue
+        return count
