@@ -3,7 +3,7 @@ import unittest
 
 from data_provider import DotaData, parse_opendota_hero_stats, parse_valve_matchups
 from dota_data import FALLBACK_HERO_NAMES, parse_valve_hero_list, parse_valve_plus_stats
-from engine import recommendations, strategy
+from engine import POSITION_ROLE_WEIGHTS, recommendations, score_hero, strategy
 
 
 def fake_hero_payload():
@@ -66,6 +66,50 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(len(set(FALLBACK_HERO_NAMES)), 127)
         for required in ("Kez", "Ringmaster", "Largo", "Anti-Mage", "Wraith King"):
             self.assertIn(required, FALLBACK_HERO_NAMES)
+
+    def test_engine_has_all_five_position_profiles(self):
+        self.assertEqual(
+            set(POSITION_ROLE_WEIGHTS),
+            {"1 Carry", "2 Mid", "3 Offlane", "4 Support", "5 Hard Support"},
+        )
+        for position, weights in POSITION_ROLE_WEIGHTS.items():
+            self.assertGreaterEqual(len(weights), 8, position)
+        self.assertGreater(POSITION_ROLE_WEIGHTS["2 Mid"]["Nuker"], 0)
+        self.assertGreater(POSITION_ROLE_WEIGHTS["2 Mid"]["Escape"], 0)
+        self.assertGreater(POSITION_ROLE_WEIGHTS["3 Offlane"]["Initiator"], 0)
+        self.assertGreater(POSITION_ROLE_WEIGHTS["5 Hard Support"]["Support"], 0)
+
+    def test_position_profiles_change_same_hero_score(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = DotaData(directory)
+            puck = data.heroes["Puck"]
+            axe = data.heroes["Axe"]
+            cm = data.heroes["Crystal Maiden"]
+            jug = data.heroes["Juggernaut"]
+
+            self.assertGreater(
+                score_hero(data, puck, [], [], "2 Mid").score,
+                score_hero(data, puck, [], [], "5 Hard Support").score,
+            )
+            self.assertGreater(
+                score_hero(data, axe, [], [], "3 Offlane").score,
+                score_hero(data, axe, [], [], "2 Mid").score,
+            )
+            self.assertGreater(
+                score_hero(data, cm, [], [], "5 Hard Support").score,
+                score_hero(data, cm, [], [], "1 Carry").score,
+            )
+            self.assertGreater(
+                score_hero(data, jug, [], [], "1 Carry").score,
+                score_hero(data, jug, [], [], "5 Hard Support").score,
+            )
+
+    def test_mid_profile_exposes_mid_criteria_in_explanation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = DotaData(directory)
+            pick = score_hero(data, data.heroes["Puck"], [], [], "2 Mid")
+            self.assertIn("2 Mid", pick.why)
+            self.assertTrue("Nuker" in pick.why or "Escape" in pick.why or "Initiator" in pick.why)
 
     def test_recommendations_exclude_drafted_and_are_unique(self):
         with tempfile.TemporaryDirectory() as directory:
