@@ -1,50 +1,52 @@
-# Dota 2 Coach MVP
+# Dota 2 Coach
 
-Desktop assistant for hero-pick recommendations and simple match tactics. It is intentionally designed as a **screen-only/manual assistant**: no DLL injection, no process-memory reading, no hidden-information extraction, and no automated input into Dota 2.
+Read-only desktop assistant for Dota 2 draft analysis and match planning.
 
-## What works
+## What is implemented
 
-- Windows/Linux desktop UI (PySide6)
-- Always-on-top coach window
-- Manual ally/enemy draft selection
-- Position 1–5 selection
-- Top-5 pick scoring from role fit, counters and team needs
-- Human-readable tactical plan
-- Optional screen capture + OpenCV template matching scaffold
+- Complete offline roster: **127 heroes** (including Kez, Ringmaster and Largo).
+- Position-aware Top-5 draft recommendations for positions 1–5.
+- Team-composition scoring: control, initiation, frontline and push.
+- Optional current hero statistics from OpenDota `GET /heroStats`.
+- Optional matchup statistics for currently selected enemies from OpenDota `GET /heroes/{hero_id}/matchups`.
+- Local JSON cache so the app keeps working offline after sync.
+- Hero portrait downloader for the screen-recognition module.
+- Read-only screen capture and OpenCV template recognition.
+- Russian tactical summary based on visible/selected lineups.
+- Always-on-top desktop window. No input automation, DLL injection, process-memory reading or hidden-information extraction.
 
-## Run
+## Windows quick start
 
 ```bash
-python -m venv .venv
-# Windows: .venv\Scripts\activate
-# Linux/macOS: source .venv/bin/activate
-pip install -r requirements.txt
+py -3.12 -m venv .venv
+.venv\Scripts\activate
+python -m pip install -r requirements.txt
 python app.py
 ```
 
-## Enable visible-screen hero recognition
+Python 3.11–3.13 is recommended.
 
-Create `assets/heroes/` and add portrait crops as PNG files, for example:
+## First use
 
-```text
-assets/heroes/
-  axe.png
-  crystal_maiden.png
-  juggernaut.png
+1. Start `python app.py`.
+2. Press **ОБНОВИТЬ ГЕРОЕВ + МАТЧАПЫ** to refresh hero metadata. If enemy heroes are already selected, their matchup packs are refreshed too.
+3. Press **СКАЧАТЬ ПОРТРЕТЫ ДЛЯ РАСПОЗНАВАНИЯ** once. Images are saved locally to `assets/heroes/` and are not committed to this repository.
+4. Select allies, enemies and your position; press **АНАЛИЗИРОВАТЬ**.
+5. **РАСПОЗНАТЬ ГЕРОЕВ НА ЭКРАНЕ** performs one read-only scan. Recognition is experimental because UI scale/resolution/theme affect template matching.
+
+## Data model
+
+The app ships a complete 127-hero fallback roster, so it starts without internet. `data/hero_stats.json` and `data/matchups.json` are generated at runtime and ignored by Git. OpenDota is used only as an optional public-statistics source; API availability and rate limits are outside this project's control.
+
+## Tests
+
+```bash
+python -m unittest discover -s tests -v
+python -m py_compile app.py dota_data.py engine.py vision.py
 ```
 
-Use images you have the right to use. The app compares these templates against the visible screen. The current MVP deliberately does not ship Valve/Dota artwork.
+GitHub Actions also installs all GUI dependencies, runs the unit tests, compiles every module and performs a headless Qt import/startup smoke test.
 
-For reliable production recognition, the next step is to define draft-screen ROIs per resolution (1920x1080, 2560x1440), crop only the pick slots, normalize portrait sizes, and classify each slot instead of scanning the entire screen.
+## Fair-play scope
 
-## Next milestones
-
-1. Full hero roster and patch-specific matchup dataset.
-2. Draft-screen calibration wizard and slot-based recognition.
-3. Transparent click-through overlay.
-4. Strategy engine using only information visible to the player or explicitly entered by the user.
-5. Packaging with PyInstaller and signed Windows builds.
-
-## Fair-play boundary
-
-This project should remain an advisory tool. Do not add memory reading, DLL injection, hidden enemy information, automatic actions, or other mechanisms that bypass normal player visibility. Check current Valve/Steam rules before distributing a live-match overlay.
+This project is intentionally limited to information the player enters or can already see on screen. It does **not** read Dota 2 process memory, reveal fog-of-war information, inject code, automate clicks/keys, or control the game.
