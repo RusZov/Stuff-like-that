@@ -9,7 +9,8 @@ from PySide6.QtWidgets import (
     QPushButton, QTextEdit, QVBoxLayout, QWidget
 )
 
-from dota_data import DotaData, POSITION_POOLS
+from data_provider import DotaData
+from dota_data import POSITION_POOLS
 from engine import recommendations, strategy
 from vision import Vision
 
@@ -128,7 +129,7 @@ class Coach(QMainWindow):
         def task():
             count = self.data.sync_heroes()
             matchups = self.data.sync_matchups(enemies) if enemies else 0
-            return f"{count} героев, matchup-пакетов: {matchups}"
+            return f"{count} героев, matchup-пакетов: {matchups}; {self.data.source}"
         self._run(task, "синхронизация завершена")
 
     def download_portraits(self):
