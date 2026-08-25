@@ -13,6 +13,25 @@ URLS = [
 ]
 
 
+def summarize(payload: object) -> str:
+    if isinstance(payload, list):
+        return f"array size={len(payload)} sample={payload[0] if payload else None}"
+    if isinstance(payload, dict):
+        if "heroes" in payload and isinstance(payload["heroes"], list):
+            return f"heroes size={len(payload['heroes'])} sample={payload['heroes'][0] if payload['heroes'] else None}"
+        if "ranked_hero_data" in payload and isinstance(payload["ranked_hero_data"], list):
+            rows = payload["ranked_hero_data"]
+            return f"ranked_hero_data size={len(rows)} sample={rows[0] if rows else None}"
+        result = payload.get("result")
+        if isinstance(result, dict):
+            data = result.get("data")
+            if isinstance(data, dict) and isinstance(data.get("heroes"), list):
+                heroes = data["heroes"]
+                return f"result.data.heroes size={len(heroes)} sample={heroes[0] if heroes else None}"
+        return f"dict keys={list(payload)[:12]}"
+    return type(payload).__name__
+
+
 def probe(url: str) -> None:
     req = urllib.request.Request(url, headers={"User-Agent": "Dota2Coach-api-probe/1.0"})
     try:
@@ -20,11 +39,8 @@ def probe(url: str) -> None:
             raw = response.read()
             ctype = response.headers.get("content-type", "")
             print(f"{url} -> HTTP {response.status}; content-type={ctype}; bytes={len(raw)}")
-            try:
-                payload = json.loads(raw.decode("utf-8"))
-                print(f"  JSON type: {type(payload).__name__}; top-level={list(payload)[:8] if isinstance(payload, dict) else 'array'}")
-            except Exception as exc:
-                print(f"  JSON decode failed: {exc}")
+            payload = json.loads(raw.decode("utf-8"))
+            print("  " + summarize(payload))
     except urllib.error.HTTPError as exc:
         body = exc.read(300).decode("utf-8", errors="replace")
         print(f"{url} -> HTTP {exc.code}; body={body!r}")
