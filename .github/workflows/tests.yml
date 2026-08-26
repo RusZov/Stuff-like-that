@@ -20,3 +20,6 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Compile package
         run: python -m compileall -q dota_coach tests
+      - name: Validate live Valve/OpenDota sources
+        if: runner.os == 'Linux'
+        run: python -m dota_coach.cli --health
