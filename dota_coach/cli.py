@@ -25,6 +25,23 @@ def _resolve_many(data: DotaData, names: list[str], label: str) -> list[Hero]:
     return heroes
 
 
+def _run_health(data: DotaData) -> int:
+    print(f"Meta coverage: {data.meta_coverage}/{len(data.heroes)} heroes")
+    if data.meta_coverage < max(100, int(len(data.heroes) * 0.75)):
+        print("Health error: OpenDota ranked meta coverage is too low", file=sys.stderr)
+        return 4
+
+    probe = data.resolve("Axe") or next(iter(data.heroes.values()))
+    data.load_enemy_matchups([probe.id])
+    rows = data.matchup_count(probe.id)
+    print(f"Matchup rows for {probe.name}: {rows}")
+    print(f"Source OpenDota matchups:{probe.id}: {data.source_status.get(f'OpenDota matchups:{probe.id}', 'missing')}")
+    if rows < 50:
+        print("Health error: OpenDota matchup endpoint returned too little usable data", file=sys.stderr)
+        return 5
+    return 0
+
+
 def make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="dota-coach",
@@ -34,7 +51,7 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--allies", default="", help="Comma-separated allied hero names")
     parser.add_argument("--enemies", default="", help="Comma-separated enemy hero names")
     parser.add_argument("--limit", type=int, default=5, help="Number of recommendations")
-    parser.add_argument("--health", action="store_true", help="Only validate live data sources")
+    parser.add_argument("--health", action="store_true", help="Validate live hero, meta and matchup data")
     return parser
 
 
@@ -59,7 +76,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Source {source}: {status}")
 
     if args.health:
-        return 0
+        return _run_health(data)
 
     try:
         allies = _resolve_many(data, _csv(args.allies), "allies")
