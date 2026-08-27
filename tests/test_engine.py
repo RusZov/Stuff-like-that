@@ -73,6 +73,15 @@ class EngineTests(unittest.TestCase):
         self.assertGreater(boosted.score, base.score)
         self.assertTrue(any("Axe" in reason for reason in boosted.reasons))
 
+    def test_meta_signal_changes_score(self):
+        weak = hero(20, "Weak Mid", ["Nuker", "Escape"], 0.46, 50000)
+        strong = hero(21, "Strong Mid", ["Nuker", "Escape"], 0.54, 50000)
+        data = FakeData([weak, strong])
+        self.assertGreater(
+            score_hero(data, strong, [], [], "2").score,
+            score_hero(data, weak, [], [], "2").score,
+        )
+
     def test_strategy_uses_visible_composition(self):
         lines = build_strategy([self.axe, self.jug, self.cm], [self.puck, self.axe])
         text = " ".join(lines)
@@ -85,6 +94,27 @@ class ParserTests(unittest.TestCase):
         payload = {"result": {"data": {"heroes": [{"id": 1, "name_english_loc": "Anti-Mage"}]}}}
         rows = DotaData._parse_valve_heroes(payload)
         self.assertEqual(rows[0]["id"], 1)
+
+    def test_current_opendota_rank_buckets_are_aggregated(self):
+        row = {
+            "1_pick": 100,
+            "1_win": 51,
+            "2_pick": 200,
+            "2_win": 104,
+            "7_pick": 50,
+            "7_win": 27,
+            "8_pick": 25,
+            "8_win": 12,
+        }
+        picks, wins = DotaData._public_pick_win(row)
+        self.assertEqual(picks, 375)
+        self.assertEqual(wins, 194)
+
+    def test_legacy_pub_stats_remain_supported(self):
+        self.assertEqual(
+            DotaData._public_pick_win({"pub_pick": 1000, "pub_win": 530}),
+            (1000, 530),
+        )
 
     def test_matchup_parser(self):
         rows = DotaData._parse_enemy_matchups([
