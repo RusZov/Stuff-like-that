@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import math
+import time
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -41,8 +42,9 @@ class Hero:
 
 
 class HttpJsonClient:
-    def __init__(self, timeout: float = 8.0) -> None:
+    def __init__(self, timeout: float = 10.0, attempts: int = 3) -> None:
         self.timeout = timeout
+        self.attempts = max(1, attempts)
         self._cache: dict[str, Any] = {}
 
     def get_json(self, url: str) -> Any:
@@ -55,13 +57,20 @@ class HttpJsonClient:
                 "Accept": "application/json",
             },
         )
-        try:
-            with urlopen(request, timeout=self.timeout) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
-            raise DataSourceError(f"Failed to fetch {url}: {exc}") from exc
-        self._cache[url] = payload
-        return payload
+        last_error: Exception | None = None
+        for attempt in range(1, self.attempts + 1):
+            try:
+                with urlopen(request, timeout=self.timeout) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                self._cache[url] = payload
+                return payload
+            except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
+                last_error = exc
+                if attempt < self.attempts:
+                    time.sleep(0.35 * attempt)
+        raise DataSourceError(
+            f"Failed to fetch {url} after {self.attempts} attempts: {last_error}"
+        ) from last_error
 
 
 class DotaData:
