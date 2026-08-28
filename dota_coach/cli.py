@@ -34,9 +34,19 @@ def _run_health(data: DotaData) -> int:
     probe = data.resolve("Axe") or next(iter(data.heroes.values()))
     data.load_enemy_matchups([probe.id])
     rows = data.matchup_count(probe.id)
+    key = f"OpenDota pro matchups:{probe.id}"
+    status = data.source_status.get(key, "missing")
     print(f"Matchup rows for {probe.name}: {rows}")
-    print(f"Source OpenDota matchups:{probe.id}: {data.source_status.get(f'OpenDota matchups:{probe.id}', 'missing')}")
+    print(f"Source {key}: {status}")
+
+    # The matchup endpoint is optional supplemental evidence and has shown
+    # transient read timeouts in CI. A transport outage should degrade the
+    # coach, not mark otherwise healthy deterministic code as broken. If the
+    # endpoint responds successfully but its schema/data collapses, still fail.
     if rows < 50:
+        if status.startswith("error:"):
+            print("Health warning: optional OpenDota matchup source is temporarily unavailable")
+            return 0
         print("Health error: OpenDota matchup endpoint returned too little usable data", file=sys.stderr)
         return 5
     return 0
@@ -100,7 +110,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"   - {reason}")
 
     print("\nTactics")
-    for line in build_strategy(allies, enemies):
+    for line in build_strategy(allies, enemies, position):
         print(f"- {line}")
 
     return 0
