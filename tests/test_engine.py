@@ -1,5 +1,6 @@
 import unittest
 
+from dota_coach.capture import WindowInfo, choose_dota_window
 from dota_coach.data import DataSourceError, DotaData, Hero
 from dota_coach.engine import build_strategy, normalize_position, recommend, score_hero
 
@@ -34,6 +35,24 @@ def hero(hero_id, name, roles, wr=0.50, games=10000):
         pub_pick=games,
         pub_win=round(games * wr),
     )
+
+
+class CaptureTests(unittest.TestCase):
+    def test_dota_window_selection_uses_real_matching_window_and_largest_client(self):
+        windows = [
+            WindowInfo(10, "Discord", 1, 1920, 1080),
+            WindowInfo(11, "Dota 2", 2, 1280, 720),
+            WindowInfo(12, "Dota 2 - Vulkan", 2, 1920, 1080),
+            WindowInfo(13, "Dota 2", 2, 0, 0),
+        ]
+        picked = choose_dota_window(windows)
+        self.assertIsNotNone(picked)
+        self.assertEqual(picked.hwnd, 12)
+        self.assertAlmostEqual(picked.aspect_ratio, 16 / 9)
+
+    def test_dota_window_selection_does_not_fall_back_to_desktop_noise(self):
+        windows = [WindowInfo(10, "Steam", 1, 1920, 1080)]
+        self.assertIsNone(choose_dota_window(windows))
 
 
 class EngineTests(unittest.TestCase):
