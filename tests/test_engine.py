@@ -1,6 +1,6 @@
 import unittest
 
-from dota_coach.data import DotaData, Hero
+from dota_coach.data import DataSourceError, DotaData, Hero
 from dota_coach.engine import build_strategy, normalize_position, recommend, score_hero
 
 
@@ -11,6 +11,17 @@ class FakeData:
 
     def candidate_win_rate_vs(self, candidate_id, enemy_id):
         return self._matchups.get((candidate_id, enemy_id))
+
+
+class FlakyMatchupClient:
+    def __init__(self):
+        self.calls = 0
+
+    def get_json(self, url):
+        self.calls += 1
+        if self.calls == 1:
+            raise DataSourceError("temporary timeout")
+        return [{"hero_id": 2, "games_played": 100, "wins": 55}]
 
 
 def hero(hero_id, name, roles, wr=0.50, games=10000):
@@ -52,6 +63,13 @@ class EngineTests(unittest.TestCase):
         jug = score_hero(data, self.jug, [], [], "5")
         self.assertGreater(cm.score, jug.score)
 
+    def test_carry_gate_penalizes_non_carry_profile(self):
+        data = FakeData(self.heroes)
+        jug = score_hero(data, self.jug, [], [], "1")
+        puck = score_hero(data, self.puck, [], [], "1")
+        self.assertGreater(jug.score, puck.score)
+        self.assertGreater(jug.confidence, puck.confidence)
+
     def test_offlane_prefers_frontline_initiator(self):
         data = FakeData(self.heroes)
         axe = score_hero(data, self.axe, [], [], "3")
@@ -72,6 +90,7 @@ class EngineTests(unittest.TestCase):
         boosted = score_hero(favorable, self.puck, [], [self.axe], "2")
         self.assertGreater(boosted.score, base.score)
         self.assertTrue(any("Axe" in reason for reason in boosted.reasons))
+        self.assertTrue(any("pro-матчап" in reason for reason in boosted.reasons))
 
     def test_meta_signal_changes_score(self):
         weak = hero(20, "Weak Mid", ["Nuker", "Escape"], 0.46, 50000)
@@ -87,6 +106,10 @@ class EngineTests(unittest.TestCase):
         text = " ".join(lines)
         self.assertIn("инициатор", text.lower())
         self.assertIn("мобиль", text.lower())
+
+    def test_strategy_has_position_lane_plan(self):
+        lines = build_strategy([self.jug, self.cm], [self.axe], "1")
+        self.assertIn("фарм", lines[0].lower())
 
 
 class ParserTests(unittest.TestCase):
@@ -124,6 +147,17 @@ class ParserTests(unittest.TestCase):
         self.assertAlmostEqual(rows[2][0], 0.55)
         self.assertEqual(rows[2][1], 100)
         self.assertNotIn(3, rows)
+
+    def test_transient_matchup_error_is_retryable(self):
+        client = FlakyMatchupClient()
+        data = DotaData(client=client)
+        data.load_enemy_matchups([1])
+        self.assertEqual(data.matchup_count(1), 0)
+        self.assertTrue(data.source_status["OpenDota pro matchups:1"].startswith("error:"))
+
+        data.load_enemy_matchups([1])
+        self.assertEqual(data.matchup_count(1), 1)
+        self.assertEqual(client.calls, 2)
 
 
 if __name__ == "__main__":
