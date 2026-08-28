@@ -11,6 +11,8 @@ from urllib.request import Request, urlopen
 VALVE_HERO_LIST_URL = "https://www.dota2.com/datafeed/herolist?language=english"
 VALVE_PATCH_LIST_URL = "https://www.dota2.com/datafeed/patchnoteslist"
 OPENDOTA_HERO_STATS_URL = "https://api.opendota.com/api/heroStats"
+# OpenDota's /heroes/{id}/matchups endpoint is an aggregate matchup source and
+# can be noticeably slower than heroStats. Treat it as optional evidence.
 OPENDOTA_MATCHUPS_URL = "https://api.opendota.com/api/heroes/{hero_id}/matchups"
 
 
@@ -83,10 +85,12 @@ class DotaData:
         self.patch: str | None = None
         self.source_status: dict[str, str] = {}
         self._enemy_matchups: dict[int, dict[int, tuple[float, int]]] = {}
+        self._normalised_names: dict[str, Hero] = {}
 
     def refresh(self) -> None:
         valve_rows: list[dict[str, Any]] = []
         stats_rows: list[dict[str, Any]] = []
+        self.source_status = {}
 
         try:
             valve_rows = self._parse_valve_heroes(self.client.get_json(VALVE_HERO_LIST_URL))
@@ -143,6 +147,10 @@ class DotaData:
 
         self.heroes = {hero.name: hero for hero in heroes}
         self.heroes_by_id = {hero.id: hero for hero in heroes}
+        self._normalised_names = {self._normalise_name(hero.name): hero for hero in heroes}
+        # Matchup data is supplemental and can become stale across refreshes or
+        # a new patch. Never carry the previous matrix into a refreshed roster.
+        self._enemy_matchups.clear()
         if not self.heroes:
             raise DataSourceError("No heroes could be parsed from live data")
 
@@ -154,6 +162,7 @@ class DotaData:
             self.patch = self._parse_latest_patch(self.client.get_json(VALVE_PATCH_LIST_URL))
             self.source_status["Valve patch list"] = "ok"
         except DataSourceError as exc:
+            self.patch = None
             self.source_status["Valve patch list"] = f"error: {exc}"
 
     @property
@@ -161,31 +170,33 @@ class DotaData:
         return sum(hero.pub_pick > 0 for hero in self.heroes.values())
 
     def resolve(self, name: str) -> Hero | None:
-        needle = self._normalise_name(name)
-        for hero in self.heroes.values():
-            if self._normalise_name(hero.name) == needle:
-                return hero
-        return None
+        return self._normalised_names.get(self._normalise_name(name))
 
     def load_enemy_matchups(self, enemy_ids: list[int]) -> None:
-        for enemy_id in enemy_ids:
+        for enemy_id in dict.fromkeys(enemy_ids):
             if enemy_id in self._enemy_matchups:
                 continue
             url = OPENDOTA_MATCHUPS_URL.format(hero_id=enemy_id)
+            key = f"OpenDota pro matchups:{enemy_id}"
             try:
                 payload = self.client.get_json(url)
                 rows = self._parse_enemy_matchups(payload)
                 self._enemy_matchups[enemy_id] = rows
-                self.source_status[f"OpenDota matchups:{enemy_id}"] = f"ok ({len(rows)} rows)"
+                self.source_status[key] = f"ok ({len(rows)} rows)"
             except DataSourceError as exc:
-                self._enemy_matchups[enemy_id] = {}
-                self.source_status[f"OpenDota matchups:{enemy_id}"] = f"error: {exc}"
+                # Important: do not cache an empty matrix on a transient error.
+                # A later call in the same process must be allowed to retry.
+                self.source_status[key] = f"error: {exc}"
 
     def matchup_count(self, enemy_id: int) -> int:
         return len(self._enemy_matchups.get(enemy_id, {}))
 
     def candidate_win_rate_vs(self, candidate_id: int, enemy_id: int) -> tuple[float, int] | None:
-        """Infer candidate WR vs enemy from the queried enemy's matchup row."""
+        """Infer candidate WR vs enemy from OpenDota's queried matchup row.
+
+        This endpoint is used as supplemental matchup evidence, not as a
+        position or current-public-bracket truth source.
+        """
         row = self._enemy_matchups.get(enemy_id, {}).get(candidate_id)
         if row is None:
             return None
