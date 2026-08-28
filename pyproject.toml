@@ -4,10 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dota-coach-mvp"
-version = "0.1.0"
+version = "0.2.0"
 description = "Draft-focused Dota 2 coach using live Valve and OpenDota data"
 requires-python = ">=3.11"
 dependencies = []
+
+[project.optional-dependencies]
+capture = [
+    "windows-capture==2.0.1; platform_system == 'Windows'",
+]
 
 [project.scripts]
 dota-coach = "dota_coach.cli:main"
