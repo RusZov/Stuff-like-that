@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from math import sqrt
 from typing import Iterable
 
-from .data import DotaData, Hero
+from .data import DotaData, Hero, RANK_NAMES
 
 POSITION_ALIASES = {
     "1": "1 Carry",
@@ -30,6 +30,28 @@ POSITION_ALIASES = {
     "hard support": "5 Hard Support",
     "pos5": "5 Hard Support",
     "5 hard support": "5 Hard Support",
+}
+
+RANK_ALIASES: dict[str, int | None] = {
+    "all": None,
+    "overall": None,
+    "any": None,
+    "1": 1,
+    "herald": 1,
+    "2": 2,
+    "guardian": 2,
+    "3": 3,
+    "crusader": 3,
+    "4": 4,
+    "archon": 4,
+    "5": 5,
+    "legend": 5,
+    "6": 6,
+    "ancient": 6,
+    "7": 7,
+    "divine": 7,
+    "8": 8,
+    "immortal": 8,
 }
 
 POSITION_ROLE_WEIGHTS: dict[str, dict[str, float]] = {
@@ -141,6 +163,42 @@ def normalize_position(position: str) -> str:
     return POSITION_ALIASES[key]
 
 
+def normalize_rank_tier(rank: str | int | None) -> int | None:
+    if rank is None:
+        return None
+    if isinstance(rank, int):
+        if rank in RANK_NAMES:
+            return rank
+        raise ValueError(f"Unknown rank tier: {rank}")
+    key = " ".join(str(rank).strip().lower().split())
+    if key not in RANK_ALIASES:
+        raise ValueError(
+            "Unknown rank: " + str(rank) + ". Use all, Herald, Guardian, Crusader, Archon, Legend, Ancient, Divine or Immortal."
+        )
+    return RANK_ALIASES[key]
+
+
+def rank_label(rank_tier: int | None) -> str:
+    return RANK_NAMES.get(rank_tier, "All ranked") if rank_tier is not None else "All ranked"
+
+
+def validate_draft(allies: list[Hero], enemies: list[Hero]) -> None:
+    if len(allies) > 5 or len(enemies) > 5:
+        raise ValueError("A Dota draft can contain at most 5 heroes per team")
+
+    ally_ids = [hero.id for hero in allies]
+    enemy_ids = [hero.id for hero in enemies]
+    if len(ally_ids) != len(set(ally_ids)):
+        raise ValueError("The allied draft contains the same hero more than once")
+    if len(enemy_ids) != len(set(enemy_ids)):
+        raise ValueError("The enemy draft contains the same hero more than once")
+
+    overlap = set(ally_ids) & set(enemy_ids)
+    if overlap:
+        names = sorted(hero.name for hero in allies if hero.id in overlap)
+        raise ValueError("A hero cannot be on both teams: " + ", ".join(names))
+
+
 def _role_counts(heroes: Iterable[Hero]) -> Counter[str]:
     counts: Counter[str] = Counter()
     for hero in heroes:
@@ -167,7 +225,6 @@ def _position_points(hero: Hero, position: str) -> tuple[float, float, list[str]
         points -= POSITION_MISS_PENALTY[position]
         reasons.append(f"слабый профиль для {position}")
 
-    # Extra guards against obvious cross-role leakage.
     if position == "1 Carry" and "Support" in hero_roles and "Carry" not in hero_roles:
         points -= 8.0
     elif position == "2 Mid" and "Support" in hero_roles and not ({"Carry", "Nuker"} & hero_roles):
@@ -184,19 +241,24 @@ def _position_points(hero: Hero, position: str) -> tuple[float, float, list[str]
     return points, position_confidence, reasons
 
 
-def _meta_points(hero: Hero) -> tuple[float, list[str]]:
-    if hero.win_rate is None:
-        return -1.5, ["нет надёжной публичной статистики"]
-    # Global ranked WR is useful but not role-specific, so keep it secondary to
-    # position fit and cap it tightly.
-    raw = (hero.win_rate - 0.50) * 120.0
-    points = max(-6.0, min(6.0, raw)) * hero.sample_confidence
+def _meta_points(hero: Hero, rank_tier: int | None) -> tuple[float, float, list[str]]:
+    picks, wins = hero.pick_win_for_rank(rank_tier)
+    if picks <= 0:
+        return -1.5, 0.0, ["нет надёжной публичной статистики"]
+
+    win_rate = wins / picks
+    sample_confidence = hero.sample_confidence_for_rank(rank_tier)
+    # heroStats is medal-specific but still not position-specific, so keep this
+    # signal secondary to position fit and cap it tightly.
+    raw = (win_rate - 0.50) * 120.0
+    points = max(-6.0, min(6.0, raw)) * sample_confidence
     reasons: list[str] = []
+    bracket = RANK_NAMES.get(rank_tier, "ranked") if rank_tier is not None else "ranked"
     if points >= 1.8:
-        reasons.append(f"публичный WR {hero.win_rate:.1%} на {hero.pub_pick:,} играх")
+        reasons.append(f"{bracket} WR {win_rate:.1%} на {picks:,} играх")
     elif points <= -2.2:
-        reasons.append(f"публичный WR ниже среднего: {hero.win_rate:.1%}")
-    return points, reasons
+        reasons.append(f"{bracket} WR ниже среднего: {win_rate:.1%}")
+    return points, sample_confidence, reasons
 
 
 def _team_points(hero: Hero, ally_counts: Counter[str], position: str) -> tuple[float, list[str]]:
@@ -224,11 +286,38 @@ def _team_points(hero: Hero, ally_counts: Counter[str], position: str) -> tuple[
     if "Durable" in ally_roles and ("Carry" in hero_roles or "Nuker" in hero_roles):
         points += 1.0
 
-    reasons = []
+    reasons: list[str] = []
     if hits:
         role = max(hits)[1]
         reasons.append(ROLE_TEXT.get(role, f"закрывает нехватку {role}"))
     return points, reasons
+
+
+def _enemy_role_points(hero: Hero, enemies: list[Hero]) -> tuple[float, list[str]]:
+    """Small role-tag fallback when detailed matchup rows are missing.
+
+    These are deliberately weak composition heuristics. They must never outrank
+    position fit or pretend to model ability-level counters.
+    """
+    enemy_counts = _role_counts(enemies)
+    hero_roles = set(hero.roles)
+    points = 0.0
+    reasons: list[str] = []
+
+    if enemy_counts.get("Escape", 0) and "Disabler" in hero_roles:
+        bonus = min(2.5, 1.5 + 0.4 * enemy_counts["Escape"])
+        points += bonus
+        reasons.append("контроль полезен против мобильного драфта")
+    if enemy_counts.get("Pusher", 0) and "Initiator" in hero_roles:
+        points += 1.25
+        reasons.append("инициация помогает наказывать сплит-пуш")
+    if enemy_counts.get("Initiator", 0) and "Escape" in hero_roles:
+        points += 1.0
+        reasons.append("мобильность помогает переживать вражеский заход")
+    if enemy_counts.get("Carry", 0) >= 2 and "Disabler" in hero_roles:
+        points += 0.75
+
+    return min(5.0, points), reasons
 
 
 def _matchup_points(data: DotaData, hero: Hero, enemies: list[Hero]) -> tuple[float, float, list[str]]:
@@ -244,7 +333,7 @@ def _matchup_points(data: DotaData, hero: Hero, enemies: list[Hero]) -> tuple[fl
             continue
         win_rate, games = matchup
         # OpenDota's hero matchup endpoint is supplemental aggregate evidence,
-        # not a current-role-specific public bracket. Keep it weaker than fit.
+        # not a current-role/current-bracket public truth. Keep it weaker than fit.
         reliability = min(1.0, sqrt(max(games, 0) / 1800.0))
         delta = max(-4.5, min(4.5, (win_rate - 0.50) * 45.0)) * reliability
         total += delta
@@ -257,14 +346,22 @@ def _matchup_points(data: DotaData, hero: Hero, enemies: list[Hero]) -> tuple[fl
         best = max(rows, key=lambda row: row[0])
         worst = min(rows, key=lambda row: row[0])
         if best[0] >= 0.53:
-            reasons.append(f"pro-матчап хорош против {best[2]} ({best[0]:.1%}, {best[1]} игр)")
+            reasons.append(f"aggregate-матчап хорош против {best[2]} ({best[0]:.1%}, {best[1]} игр)")
         if worst[0] <= 0.47:
-            reasons.append(f"pro-матчап рискованный против {worst[2]} ({worst[0]:.1%}, {worst[1]} игр)")
+            reasons.append(f"aggregate-матчап рискованный против {worst[2]} ({worst[0]:.1%}, {worst[1]} игр)")
     return total, min(1.0, evidence / max(1, len(enemies))), reasons
 
 
-def score_hero(data: DotaData, hero: Hero, allies: list[Hero], enemies: list[Hero], position: str) -> Pick:
+def score_hero(
+    data: DotaData,
+    hero: Hero,
+    allies: list[Hero],
+    enemies: list[Hero],
+    position: str,
+    rank_tier: str | int | None = None,
+) -> Pick:
     position = normalize_position(position)
+    rank_tier = normalize_rank_tier(rank_tier)
     score = 50.0
     reasons: list[str] = []
 
@@ -272,12 +369,16 @@ def score_hero(data: DotaData, hero: Hero, allies: list[Hero], enemies: list[Her
     score += points
     reasons.extend(extra)
 
-    points, extra = _meta_points(hero)
+    points, meta_confidence, extra = _meta_points(hero, rank_tier)
     score += points
     reasons.extend(extra)
 
     ally_counts = _role_counts(allies)
     points, extra = _team_points(hero, ally_counts, position)
+    score += points
+    reasons.extend(extra)
+
+    points, extra = _enemy_role_points(hero, enemies)
     score += points
     reasons.extend(extra)
 
@@ -288,7 +389,7 @@ def score_hero(data: DotaData, hero: Hero, allies: list[Hero], enemies: list[Her
     confidence = (
         0.25
         + 0.25 * position_confidence
-        + 0.30 * hero.sample_confidence
+        + 0.30 * meta_confidence
         + 0.20 * matchup_confidence
     )
     confidence = max(0.0, min(1.0, confidence))
@@ -310,16 +411,20 @@ def recommend(
     enemies: list[Hero],
     position: str,
     limit: int = 5,
+    rank_tier: str | int | None = None,
 ) -> list[Pick]:
     position = normalize_position(position)
+    rank_tier = normalize_rank_tier(rank_tier)
+    validate_draft(allies, enemies)
     unavailable = {hero.id for hero in allies + enemies}
     candidates = [hero for hero in data.heroes.values() if hero.id not in unavailable]
-    picks = [score_hero(data, hero, allies, enemies, position) for hero in candidates]
+    picks = [score_hero(data, hero, allies, enemies, position, rank_tier) for hero in candidates]
     picks.sort(key=lambda pick: (-pick.score, -pick.confidence, pick.hero))
     return picks[: max(1, limit)]
 
 
 def build_strategy(allies: list[Hero], enemies: list[Hero], position: str | None = None) -> list[str]:
+    validate_draft(allies, enemies)
     ally_counts = _role_counts(allies)
     enemy_counts = _role_counts(enemies)
     ally_roles = set(ally_counts)
