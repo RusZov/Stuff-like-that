@@ -11,9 +11,20 @@ from urllib.request import Request, urlopen
 VALVE_HERO_LIST_URL = "https://www.dota2.com/datafeed/herolist?language=english"
 VALVE_PATCH_LIST_URL = "https://www.dota2.com/datafeed/patchnoteslist"
 OPENDOTA_HERO_STATS_URL = "https://api.opendota.com/api/heroStats"
-# OpenDota's /heroes/{id}/matchups endpoint is an aggregate matchup source and
+# OpenDota's /heroes/{id}/matchups endpoint is aggregate matchup evidence and
 # can be noticeably slower than heroStats. Treat it as optional evidence.
 OPENDOTA_MATCHUPS_URL = "https://api.opendota.com/api/heroes/{hero_id}/matchups"
+
+RANK_NAMES = {
+    1: "Herald",
+    2: "Guardian",
+    3: "Crusader",
+    4: "Archon",
+    5: "Legend",
+    6: "Ancient",
+    7: "Divine",
+    8: "Immortal",
+}
 
 
 class DataSourceError(RuntimeError):
@@ -29,6 +40,8 @@ class Hero:
     roles: tuple[str, ...]
     pub_pick: int = 0
     pub_win: int = 0
+    rank_picks: tuple[int, ...] = ()
+    rank_wins: tuple[int, ...] = ()
 
     @property
     def win_rate(self) -> float | None:
@@ -38,9 +51,42 @@ class Hero:
 
     @property
     def sample_confidence(self) -> float:
-        if self.pub_pick <= 0:
+        return self._sample_confidence(self.pub_pick)
+
+    def pick_win_for_rank(self, rank_tier: int | None) -> tuple[int, int]:
+        """Return picks/wins for one OpenDota medal bucket or overall.
+
+        If a requested bucket is absent in an older payload, fall back to the
+        aggregate ranked sample instead of silently treating the hero as having
+        zero games.
+        """
+        if rank_tier is None:
+            return self.pub_pick, self.pub_win
+        if rank_tier not in RANK_NAMES:
+            raise ValueError(f"rank_tier must be 1-8 or None, got {rank_tier!r}")
+        index = rank_tier - 1
+        if index < len(self.rank_picks) and index < len(self.rank_wins):
+            picks = max(0, int(self.rank_picks[index]))
+            wins = min(picks, max(0, int(self.rank_wins[index])))
+            if picks > 0:
+                return picks, wins
+        return self.pub_pick, self.pub_win
+
+    def win_rate_for_rank(self, rank_tier: int | None) -> float | None:
+        picks, wins = self.pick_win_for_rank(rank_tier)
+        if picks <= 0:
+            return None
+        return wins / picks
+
+    def sample_confidence_for_rank(self, rank_tier: int | None) -> float:
+        picks, _ = self.pick_win_for_rank(rank_tier)
+        return self._sample_confidence(picks)
+
+    @staticmethod
+    def _sample_confidence(picks: int) -> float:
+        if picks <= 0:
             return 0.0
-        return min(1.0, math.log10(self.pub_pick + 1) / 5.0)
+        return min(1.0, math.log10(picks + 1) / 5.0)
 
 
 class HttpJsonClient:
@@ -55,7 +101,7 @@ class HttpJsonClient:
         request = Request(
             url,
             headers={
-                "User-Agent": "DotaCoachMVP/0.2 (+https://github.com/RusZov/Stuff-like-that)",
+                "User-Agent": "DotaCoachMVP/0.3 (+https://github.com/RusZov/Stuff-like-that)",
                 "Accept": "application/json",
             },
         )
@@ -132,6 +178,7 @@ class DotaData:
             except (TypeError, ValueError):
                 complexity = None
 
+            rank_picks, rank_wins = self._rank_pick_wins(stats)
             pub_pick, pub_win = self._public_pick_win(stats)
             heroes.append(
                 Hero(
@@ -142,6 +189,8 @@ class DotaData:
                     roles=roles,
                     pub_pick=pub_pick,
                     pub_win=pub_win,
+                    rank_picks=rank_picks,
+                    rank_wins=rank_wins,
                 )
             )
 
@@ -169,6 +218,11 @@ class DotaData:
     def meta_coverage(self) -> int:
         return sum(hero.pub_pick > 0 for hero in self.heroes.values())
 
+    def rank_meta_coverage(self, rank_tier: int) -> int:
+        if rank_tier not in RANK_NAMES:
+            raise ValueError(f"rank_tier must be 1-8, got {rank_tier!r}")
+        return sum(hero.pick_win_for_rank(rank_tier)[0] > 0 for hero in self.heroes.values())
+
     def resolve(self, name: str) -> Hero | None:
         return self._normalised_names.get(self._normalise_name(name))
 
@@ -194,8 +248,8 @@ class DotaData:
     def candidate_win_rate_vs(self, candidate_id: int, enemy_id: int) -> tuple[float, int] | None:
         """Infer candidate WR vs enemy from OpenDota's queried matchup row.
 
-        This endpoint is used as supplemental matchup evidence, not as a
-        position or current-public-bracket truth source.
+        This endpoint is used as supplemental aggregate matchup evidence, not
+        as a position- or bracket-specific current-public truth source.
         """
         row = self._enemy_matchups.get(enemy_id, {}).get(candidate_id)
         if row is None:
@@ -220,18 +274,26 @@ class DotaData:
         return [row for row in payload if isinstance(row, dict) and "id" in row]
 
     @staticmethod
-    def _public_pick_win(row: dict[str, Any]) -> tuple[int, int]:
-        """Return ranked public picks/wins from OpenDota heroStats.
+    def _rank_pick_wins(row: dict[str, Any]) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        picks: list[int] = []
+        wins: list[int] = []
+        for rank in range(1, 9):
+            rank_picks = max(0, DotaData._as_int(row.get(f"{rank}_pick")))
+            rank_wins = min(rank_picks, max(0, DotaData._as_int(row.get(f"{rank}_win"))))
+            picks.append(rank_picks)
+            wins.append(rank_wins)
+        return tuple(picks), tuple(wins)
 
-        Current OpenDota exposes rank buckets 1_pick..8_pick and 1_win..8_win.
-        Older payloads sometimes exposed pub_pick/pub_win, so keep that as a
-        compatibility fallback instead of silently producing zero meta data.
-        """
-        ranked_pick = sum(DotaData._as_int(row.get(f"{rank}_pick")) for rank in range(1, 9))
-        ranked_win = sum(DotaData._as_int(row.get(f"{rank}_win")) for rank in range(1, 9))
+    @staticmethod
+    def _public_pick_win(row: dict[str, Any]) -> tuple[int, int]:
+        """Return aggregate ranked public picks/wins from OpenDota heroStats."""
+        rank_picks, rank_wins = DotaData._rank_pick_wins(row)
+        ranked_pick = sum(rank_picks)
+        ranked_win = sum(rank_wins)
         if ranked_pick > 0:
             return ranked_pick, min(ranked_pick, max(0, ranked_win))
 
+        # Compatibility fallback for old/cached OpenDota payloads.
         pub_pick = DotaData._as_int(row.get("pub_pick"))
         pub_win = DotaData._as_int(row.get("pub_win"))
         if pub_pick > 0:
