@@ -2,7 +2,14 @@ import unittest
 
 from dota_coach.capture import WindowInfo, choose_dota_window
 from dota_coach.data import DataSourceError, DotaData, Hero
-from dota_coach.engine import build_strategy, normalize_position, recommend, score_hero
+from dota_coach.engine import (
+    build_strategy,
+    normalize_position,
+    normalize_rank_tier,
+    recommend,
+    score_hero,
+    validate_draft,
+)
 
 
 class FakeData:
@@ -25,7 +32,7 @@ class FlakyMatchupClient:
         return [{"hero_id": 2, "games_played": 100, "wins": 55}]
 
 
-def hero(hero_id, name, roles, wr=0.50, games=10000):
+def hero(hero_id, name, roles, wr=0.50, games=10000, rank_picks=(), rank_wins=()):
     return Hero(
         id=hero_id,
         name=name,
@@ -34,6 +41,8 @@ def hero(hero_id, name, roles, wr=0.50, games=10000):
         roles=tuple(roles),
         pub_pick=games,
         pub_win=round(games * wr),
+        rank_picks=tuple(rank_picks),
+        rank_wins=tuple(rank_wins),
     )
 
 
@@ -69,6 +78,13 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(normalize_position("mid"), "2 Mid")
         self.assertEqual(normalize_position("5"), "5 Hard Support")
 
+    def test_rank_aliases(self):
+        self.assertIsNone(normalize_rank_tier("all"))
+        self.assertEqual(normalize_rank_tier("legend"), 5)
+        self.assertEqual(normalize_rank_tier(8), 8)
+        with self.assertRaises(ValueError):
+            normalize_rank_tier("wood")
+
     def test_mid_prefers_mid_profile(self):
         data = FakeData(self.heroes)
         picks = recommend(data, [], [], "mid", 3)
@@ -102,6 +118,12 @@ class EngineTests(unittest.TestCase):
         self.assertNotIn("Crystal Maiden", names)
         self.assertNotIn("Axe", names)
 
+    def test_invalid_draft_overlap_is_rejected(self):
+        with self.assertRaises(ValueError):
+            validate_draft([self.axe], [self.axe])
+        with self.assertRaises(ValueError):
+            recommend(FakeData(self.heroes), [self.axe], [self.axe], "3")
+
     def test_real_matchup_signal_changes_score(self):
         neutral = FakeData(self.heroes)
         favorable = FakeData(self.heroes, {(self.puck.id, self.axe.id): (0.62, 2400)})
@@ -109,7 +131,14 @@ class EngineTests(unittest.TestCase):
         boosted = score_hero(favorable, self.puck, [], [self.axe], "2")
         self.assertGreater(boosted.score, base.score)
         self.assertTrue(any("Axe" in reason for reason in boosted.reasons))
-        self.assertTrue(any("pro-матчап" in reason for reason in boosted.reasons))
+        self.assertTrue(any("матчап" in reason for reason in boosted.reasons))
+
+    def test_enemy_role_fallback_rewards_control_into_escape(self):
+        data = FakeData(self.heroes)
+        without_enemy = score_hero(data, self.lion, [], [], "4")
+        into_puck = score_hero(data, self.lion, [], [self.puck], "4")
+        self.assertGreater(into_puck.score, without_enemy.score)
+        self.assertTrue(any("мобиль" in reason for reason in into_puck.reasons))
 
     def test_meta_signal_changes_score(self):
         weak = hero(20, "Weak Mid", ["Nuker", "Escape"], 0.46, 50000)
@@ -120,8 +149,22 @@ class EngineTests(unittest.TestCase):
             score_hero(data, weak, [], [], "2").score,
         )
 
+    def test_selected_rank_bucket_changes_meta_signal(self):
+        # Same overall WR, opposite Legend samples. Rank-specific scoring should
+        # use bucket 5 instead of hiding the difference in the global aggregate.
+        rank_picks = [0, 0, 0, 0, 20000, 0, 0, 0]
+        strong_wins = [0, 0, 0, 0, 11200, 0, 0, 0]
+        weak_wins = [0, 0, 0, 0, 8800, 0, 0, 0]
+        strong = hero(30, "Legend Strong", ["Nuker", "Escape"], 0.50, 40000, rank_picks, strong_wins)
+        weak = hero(31, "Legend Weak", ["Nuker", "Escape"], 0.50, 40000, rank_picks, weak_wins)
+        data = FakeData([strong, weak])
+        strong_pick = score_hero(data, strong, [], [], "2", "legend")
+        weak_pick = score_hero(data, weak, [], [], "2", "legend")
+        self.assertGreater(strong_pick.score, weak_pick.score)
+        self.assertTrue(any("Legend" in reason for reason in strong_pick.reasons))
+
     def test_strategy_uses_visible_composition(self):
-        lines = build_strategy([self.axe, self.jug, self.cm], [self.puck, self.axe])
+        lines = build_strategy([self.axe, self.jug, self.cm], [self.puck, self.sf])
         text = " ".join(lines)
         self.assertIn("инициатор", text.lower())
         self.assertIn("мобиль", text.lower())
@@ -151,6 +194,26 @@ class ParserTests(unittest.TestCase):
         picks, wins = DotaData._public_pick_win(row)
         self.assertEqual(picks, 375)
         self.assertEqual(wins, 194)
+
+        rank_picks, rank_wins = DotaData._rank_pick_wins(row)
+        self.assertEqual(rank_picks[0], 100)
+        self.assertEqual(rank_wins[0], 51)
+        self.assertEqual(rank_picks[7], 25)
+        self.assertEqual(rank_wins[7], 12)
+
+    def test_hero_rank_sample_uses_requested_bucket(self):
+        value = hero(
+            99,
+            "Bracket Hero",
+            ["Carry"],
+            0.50,
+            10000,
+            [100, 200, 300, 400, 500, 600, 700, 800],
+            [50, 100, 150, 200, 300, 300, 350, 400],
+        )
+        picks, wins = value.pick_win_for_rank(5)
+        self.assertEqual((picks, wins), (500, 300))
+        self.assertAlmostEqual(value.win_rate_for_rank(5), 0.60)
 
     def test_legacy_pub_stats_remain_supported(self):
         self.assertEqual(
