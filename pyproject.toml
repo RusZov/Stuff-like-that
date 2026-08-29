@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dota-coach-mvp"
-version = "0.2.0"
+version = "0.3.0"
 description = "Draft-focused Dota 2 coach using live Valve and OpenDota data"
 requires-python = ">=3.11"
 dependencies = []
