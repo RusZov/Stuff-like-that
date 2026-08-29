@@ -3,8 +3,16 @@ from __future__ import annotations
 import argparse
 import sys
 
-from .data import DataSourceError, DotaData, Hero
-from .engine import build_strategy, normalize_position, recommend
+from .capture import CaptureError, capture_dota_png
+from .data import DataSourceError, DotaData, Hero, RANK_NAMES
+from .engine import (
+    build_strategy,
+    normalize_position,
+    normalize_rank_tier,
+    rank_label,
+    recommend,
+    validate_draft,
+)
 
 
 def _csv(value: str) -> list[str]:
@@ -30,6 +38,14 @@ def _run_health(data: DotaData) -> int:
     if data.meta_coverage < max(100, int(len(data.heroes) * 0.75)):
         print("Health error: OpenDota ranked meta coverage is too low", file=sys.stderr)
         return 4
+
+    bracket_coverages = [data.rank_meta_coverage(rank) for rank in RANK_NAMES]
+    print("Bracket coverage: " + ", ".join(
+        f"{RANK_NAMES[rank]}={bracket_coverages[rank - 1]}" for rank in RANK_NAMES
+    ))
+    if min(bracket_coverages) < max(90, int(len(data.heroes) * 0.65)):
+        print("Health error: at least one OpenDota rank bucket has too little usable data", file=sys.stderr)
+        return 6
 
     probe = data.resolve("Axe") or next(iter(data.heroes.values()))
     data.load_enemy_matchups([probe.id])
@@ -58,17 +74,42 @@ def make_parser() -> argparse.ArgumentParser:
         description="Draft-focused Dota 2 coach using live Valve/OpenDota data.",
     )
     parser.add_argument("--role", default="2", help="1/carry, 2/mid, 3/offlane, 4/support, 5/hard support")
+    parser.add_argument(
+        "--rank",
+        default="all",
+        help="all or medal: Herald, Guardian, Crusader, Archon, Legend, Ancient, Divine, Immortal",
+    )
     parser.add_argument("--allies", default="", help="Comma-separated allied hero names")
     parser.add_argument("--enemies", default="", help="Comma-separated enemy hero names")
     parser.add_argument("--limit", type=int, default=5, help="Number of recommendations")
-    parser.add_argument("--health", action="store_true", help="Validate live hero, meta and matchup data")
+    parser.add_argument("--health", action="store_true", help="Validate live hero, bracket-meta and matchup data")
+    parser.add_argument(
+        "--capture-draft",
+        metavar="PNG",
+        help="Windows: save one exact Dota HWND frame to PNG for draft-layout calibration; no data APIs are called",
+    )
+    parser.add_argument("--capture-timeout", type=float, default=3.0, help="Seconds to wait for a captured Dota frame")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = make_parser().parse_args(argv)
+
+    if args.capture_draft:
+        try:
+            window, path = capture_dota_png(args.capture_draft, timeout=args.capture_timeout)
+        except (CaptureError, ValueError) as exc:
+            print(f"Capture error: {exc}", file=sys.stderr)
+            return 7
+        print(
+            f"Captured {window.title!r} hwnd={window.hwnd} client={window.width}x{window.height} "
+            f"aspect={window.aspect_ratio:.4f} -> {path}"
+        )
+        return 0
+
     try:
         position = normalize_position(args.role)
+        rank_tier = normalize_rank_tier(args.rank)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -91,6 +132,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         allies = _resolve_many(data, _csv(args.allies), "allies")
         enemies = _resolve_many(data, _csv(args.enemies), "enemies")
+        validate_draft(allies, enemies)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -98,13 +140,16 @@ def main(argv: list[str] | None = None) -> int:
     data.load_enemy_matchups([hero.id for hero in enemies])
 
     print(f"\nRole: {position}")
+    print(f"Meta bracket: {rank_label(rank_tier)}")
     if allies:
         print("Allies: " + ", ".join(hero.name for hero in allies))
     if enemies:
         print("Enemies: " + ", ".join(hero.name for hero in enemies))
 
     print("\nRecommendations")
-    for index, pick in enumerate(recommend(data, allies, enemies, position, args.limit), start=1):
+    for index, pick in enumerate(
+        recommend(data, allies, enemies, position, args.limit, rank_tier), start=1
+    ):
         print(f"{index}. {pick.hero}: score={pick.score:.2f}, confidence={pick.confidence:.0%}")
         for reason in pick.reasons:
             print(f"   - {reason}")
