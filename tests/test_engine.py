@@ -135,8 +135,10 @@ class EngineTests(unittest.TestCase):
 
     def test_enemy_role_fallback_rewards_control_into_escape(self):
         data = FakeData(self.heroes)
-        without_enemy = score_hero(data, self.lion, [], [], "4")
-        into_puck = score_hero(data, self.lion, [], [self.puck], "4")
+        # CM already covers most generic support needs, preventing Lion's base
+        # score from saturating at 99 before the enemy-response bonus is added.
+        without_enemy = score_hero(data, self.lion, [self.cm], [], "4")
+        into_puck = score_hero(data, self.lion, [self.cm], [self.puck], "4")
         self.assertGreater(into_puck.score, without_enemy.score)
         self.assertTrue(any("мобиль" in reason for reason in into_puck.reasons))
 
@@ -150,8 +152,6 @@ class EngineTests(unittest.TestCase):
         )
 
     def test_selected_rank_bucket_changes_meta_signal(self):
-        # Same overall WR, opposite Legend samples. Rank-specific scoring should
-        # use bucket 5 instead of hiding the difference in the global aggregate.
         rank_picks = [0, 0, 0, 0, 20000, 0, 0, 0]
         strong_wins = [0, 0, 0, 0, 11200, 0, 0, 0]
         weak_wins = [0, 0, 0, 0, 8800, 0, 0, 0]
