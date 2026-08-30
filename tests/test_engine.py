@@ -13,12 +13,25 @@ from dota_coach.engine import (
 
 
 class FakeData:
-    def __init__(self, heroes, matchups=None):
+    def __init__(self, heroes, matchups=None, lane_samples=None):
         self.heroes = {hero.name: hero for hero in heroes}
         self._matchups = matchups or {}
+        self._lane_samples = lane_samples or {}
 
     def candidate_win_rate_vs(self, candidate_id, enemy_id):
         return self._matchups.get((candidate_id, enemy_id))
+
+    def lane_role_sample(self, hero_id, lane_role):
+        return self._lane_samples.get((hero_id, lane_role))
+
+    def lane_role_share(self, hero_id, lane_role):
+        total = sum(
+            self._lane_samples.get((hero_id, role), (0, 0))[0]
+            for role in (1, 2, 3)
+        )
+        if total <= 0:
+            return None
+        return self._lane_samples.get((hero_id, lane_role), (0, 0))[0] / total
 
 
 class FlakyMatchupClient:
@@ -135,8 +148,6 @@ class EngineTests(unittest.TestCase):
 
     def test_enemy_role_fallback_rewards_control_into_escape(self):
         data = FakeData(self.heroes)
-        # CM already covers most generic support needs, preventing Lion's base
-        # score from saturating at 99 before the enemy-response bonus is added.
         without_enemy = score_hero(data, self.lion, [self.cm], [], "4")
         into_puck = score_hero(data, self.lion, [self.cm], [self.puck], "4")
         self.assertGreater(into_puck.score, without_enemy.score)
@@ -163,6 +174,30 @@ class EngineTests(unittest.TestCase):
         self.assertGreater(strong_pick.score, weak_pick.score)
         self.assertTrue(any("Legend" in reason for reason in strong_pick.reasons))
 
+    def test_lane_role_evidence_improves_mid_fit(self):
+        mid_main = hero(40, "Mid Main", ["Nuker", "Escape"], 0.50, 30000)
+        lane_flex = hero(41, "Lane Flex", ["Nuker", "Escape"], 0.50, 30000)
+        samples = {
+            (40, 1): (150, 75),
+            (40, 2): (1700, 918),
+            (40, 3): (150, 75),
+            (41, 1): (900, 450),
+            (41, 2): (100, 50),
+            (41, 3): (1000, 500),
+        }
+        data = FakeData([mid_main, lane_flex], lane_samples=samples)
+        specialist = score_hero(data, mid_main, [], [], "2")
+        flex = score_hero(data, lane_flex, [], [], "2")
+        self.assertGreater(specialist.score, flex.score)
+        self.assertGreater(specialist.confidence, flex.confidence)
+        self.assertTrue(any("lane-role" in reason for reason in specialist.reasons))
+
+    def test_flexible_support_does_not_saturate_score(self):
+        data = FakeData(self.heroes)
+        lion = score_hero(data, self.lion, [], [], "4")
+        self.assertLess(lion.score, 99.0)
+        self.assertGreater(lion.score, 60.0)
+
     def test_strategy_uses_visible_composition(self):
         lines = build_strategy([self.axe, self.jug, self.cm], [self.puck, self.sf])
         text = " ".join(lines)
@@ -172,6 +207,11 @@ class EngineTests(unittest.TestCase):
     def test_strategy_has_position_lane_plan(self):
         lines = build_strategy([self.jug, self.cm], [self.axe], "1")
         self.assertIn("фарм", lines[0].lower())
+
+    def test_strategy_calls_out_greedy_multi_carry_enemy(self):
+        second_carry = hero(42, "Greedy Core", ["Carry", "Escape"], 0.50)
+        lines = build_strategy([self.axe, self.cm], [self.jug, second_carry], "3")
+        self.assertTrue(any("жад" in line.lower() for line in lines))
 
 
 class ParserTests(unittest.TestCase):
@@ -229,6 +269,18 @@ class ParserTests(unittest.TestCase):
         self.assertAlmostEqual(rows[2][0], 0.55)
         self.assertEqual(rows[2][1], 100)
         self.assertNotIn(3, rows)
+
+    def test_lane_role_parser_aggregates_time_buckets(self):
+        rows = DotaData._parse_lane_roles(
+            [
+                {"hero_id": 2, "lane_role": 2, "time": 600, "games": "40", "wins": "22"},
+                {"hero_id": 2, "lane_role": 2, "time": 1200, "games": "60", "wins": "31"},
+                {"hero_id": 2, "lane_role": 1, "time": 1200, "games": "999", "wins": "999"},
+                {"hero_id": 3, "lane_role": 2, "time": 600, "games": "0", "wins": "0"},
+            ],
+            expected_lane_role=2,
+        )
+        self.assertEqual(rows, {2: (100, 53)})
 
     def test_transient_matchup_error_is_retryable(self):
         client = FlakyMatchupClient()
