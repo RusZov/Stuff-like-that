@@ -125,6 +125,25 @@ POSITION_MISS_PENALTY = {
     "5 Hard Support": 18.0,
 }
 
+# OpenDota lane_role is lane assignment, not exact farm priority. It therefore
+# complements, rather than replaces, the role-profile gate above.
+POSITION_LANE_ROLE = {
+    "1 Carry": 1,
+    "2 Mid": 2,
+    "3 Offlane": 3,
+    "4 Support": 3,
+    "5 Hard Support": 1,
+}
+
+LANE_ROLE_TEXT = {1: "safelane", 2: "mid", 3: "offlane"}
+LANE_ROLE_MAX_POINTS = {
+    "1 Carry": 7.0,
+    "2 Mid": 10.0,
+    "3 Offlane": 8.0,
+    "4 Support": 5.0,
+    "5 Hard Support": 5.0,
+}
+
 TEAM_NEEDS = {
     "Disabler": 5.0,
     "Initiator": 4.5,
@@ -209,15 +228,28 @@ def _role_counts(heroes: Iterable[Hero]) -> Counter[str]:
 def _position_points(hero: Hero, position: str) -> tuple[float, float, list[str]]:
     weights = POSITION_ROLE_WEIGHTS[position]
     hero_roles = set(hero.roles)
-    points = sum(weights.get(role, 0.0) for role in hero.roles)
     reasons: list[str] = []
 
-    positive = sorted(
-        ((weights.get(role, 0.0), role) for role in hero.roles if weights.get(role, 0.0) >= 4.0),
-        reverse=True,
+    # Summing every positive Valve/OpenDota tag at full weight made flexible
+    # heroes hit score=99 too easily. Preserve the strongest role signal and
+    # apply diminishing returns to additional tags.
+    positive_values = sorted(
+        (weights.get(role, 0.0), role)
+        for role in hero.roles
+        if weights.get(role, 0.0) > 0
     )
-    if positive:
-        reasons.append(f"профиль {positive[0][1]} подходит для {position}")
+    positive_values.reverse()
+    decay = (1.0, 0.65, 0.40, 0.25, 0.15, 0.10)
+    positive_points = sum(
+        weight * decay[min(index, len(decay) - 1)]
+        for index, (weight, _role) in enumerate(positive_values)
+    )
+    negative_points = sum(weights.get(role, 0.0) for role in hero.roles if weights.get(role, 0.0) < 0)
+    points = positive_points + negative_points
+
+    strong = [(weight, role) for weight, role in positive_values if weight >= 4.0]
+    if strong:
+        reasons.append(f"профиль {strong[0][1]} подходит для {position}")
 
     required = POSITION_REQUIRED_TAGS[position]
     has_profile = bool(hero_roles & required)
@@ -239,6 +271,48 @@ def _position_points(hero: Hero, position: str) -> tuple[float, float, list[str]
 
     position_confidence = 1.0 if has_profile else 0.25
     return points, position_confidence, reasons
+
+
+def _lane_role_points(data: DotaData, hero: Hero, position: str) -> tuple[float, float, list[str]]:
+    sample_fn = getattr(data, "lane_role_sample", None)
+    share_fn = getattr(data, "lane_role_share", None)
+    if not callable(sample_fn) or not callable(share_fn):
+        return 0.0, 0.0, []
+
+    lane_role = POSITION_LANE_ROLE[position]
+    sample = sample_fn(hero.id, lane_role)
+    share = share_fn(hero.id, lane_role)
+    if sample is None or share is None:
+        return 0.0, 0.0, []
+
+    games, wins = sample
+    if games <= 0:
+        return 0.0, 0.0, []
+
+    # Lane-role scenarios are aggregate and not medal-specific, so cap them
+    # below the explicit role fit. 35% is treated as neutral; highly specialized
+    # heroes move toward the positive cap, rare lane appearances toward negative.
+    sample_confidence = min(1.0, sqrt(games / 1200.0))
+    max_points = LANE_ROLE_MAX_POINTS[position]
+    lane_fit = max(-1.0, min(1.0, (share - 0.35) / 0.55))
+    points = lane_fit * max_points * sample_confidence
+
+    # A small lane-specific WR correction is useful but must not double-count
+    # the much larger medal-bracket meta signal.
+    win_rate = wins / games
+    wr_points = max(-2.0, min(2.0, (win_rate - 0.50) * 30.0)) * sample_confidence
+    points += wr_points
+
+    reasons: list[str] = []
+    lane_name = LANE_ROLE_TEXT[lane_role]
+    if share >= 0.45 and games >= 100:
+        reasons.append(f"aggregate lane-role: {share:.0%} игр в {lane_name} ({games:,} наблюдений)")
+    elif share <= 0.12 and games >= 50:
+        reasons.append(f"редко появляется в {lane_name} по lane-role данным ({share:.0%})")
+    if wr_points >= 1.0:
+        reasons.append(f"lane-role WR {win_rate:.1%} в {lane_name}")
+
+    return points, sample_confidence, reasons
 
 
 def _meta_points(hero: Hero, rank_tier: int | None) -> tuple[float, float, list[str]]:
@@ -263,7 +337,7 @@ def _meta_points(hero: Hero, rank_tier: int | None) -> tuple[float, float, list[
 
 def _team_points(hero: Hero, ally_counts: Counter[str], position: str) -> tuple[float, list[str]]:
     weights = POSITION_ROLE_WEIGHTS[position]
-    points = 0.0
+    missing_points = 0.0
     hits: list[tuple[float, str]] = []
     for role, bonus in TEAM_NEEDS.items():
         if role not in hero.roles or ally_counts.get(role, 0) > 0:
@@ -272,19 +346,33 @@ def _team_points(hero: Hero, ally_counts: Counter[str], position: str) -> tuple[
         # the selected position (for example Support on position 1).
         if weights.get(role, 0.0) < 0:
             continue
-        points += bonus
+        missing_points += bonus
         hits.append((bonus, role))
+
+    # A flexible hero covering four generic tags used to gain 12-15 points from
+    # an empty draft and saturate score=99. Missing-function coverage matters,
+    # but it is not four independent full bonuses.
+    points = min(7.5, missing_points)
 
     ally_roles = set(ally_counts)
     hero_roles = set(hero.roles)
+    synergy = 0.0
     if "Initiator" in ally_roles and "Nuker" in hero_roles:
-        points += 2.0
+        synergy += 2.0
     if "Disabler" in ally_roles and "Carry" in hero_roles:
-        points += 1.5
+        synergy += 1.5
     if "Carry" in ally_roles and "Support" in hero_roles:
-        points += 2.0
+        synergy += 2.0
     if "Durable" in ally_roles and ("Carry" in hero_roles or "Nuker" in hero_roles):
-        points += 1.0
+        synergy += 1.0
+    points += min(3.5, synergy)
+
+    # Mild diminishing return for repeatedly stacking the same broad function.
+    redundancy = 0.0
+    for role in ("Initiator", "Durable", "Pusher", "Nuker"):
+        if role in hero_roles and ally_counts.get(role, 0) >= 2:
+            redundancy += 0.75
+    points -= min(2.0, redundancy)
 
     reasons: list[str] = []
     if hits:
@@ -369,6 +457,10 @@ def score_hero(
     score += points
     reasons.extend(extra)
 
+    points, lane_confidence, extra = _lane_role_points(data, hero, position)
+    score += points
+    reasons.extend(extra)
+
     points, meta_confidence, extra = _meta_points(hero, rank_tier)
     score += points
     reasons.extend(extra)
@@ -387,10 +479,11 @@ def score_hero(
     reasons.extend(extra)
 
     confidence = (
-        0.25
-        + 0.25 * position_confidence
-        + 0.30 * meta_confidence
-        + 0.20 * matchup_confidence
+        0.18
+        + 0.22 * position_confidence
+        + 0.22 * lane_confidence
+        + 0.23 * meta_confidence
+        + 0.15 * matchup_confidence
     )
     confidence = max(0.0, min(1.0, confidence))
     unique_reasons = tuple(dict.fromkeys(reasons))[:5]
@@ -416,6 +509,13 @@ def recommend(
     position = normalize_position(position)
     rank_tier = normalize_rank_tier(rank_tier)
     validate_draft(allies, enemies)
+
+    # Load all three normal lanes so lane_role_share has an unbiased denominator.
+    # Fake/test data objects simply omit this optional method.
+    lane_loader = getattr(data, "load_lane_roles", None)
+    if callable(lane_loader):
+        lane_loader([1, 2, 3])
+
     unavailable = {hero.id for hero in allies + enemies}
     candidates = [hero for hero in data.heroes.values() if hero.id not in unavailable]
     picks = [score_hero(data, hero, allies, enemies, position, rank_tier) for hero in candidates]
@@ -447,6 +547,8 @@ def build_strategy(allies: list[Hero], enemies: list[Hero], position: str | None
     else:
         lines.append("Надёжной инициации мало: играйте от контратаки, вижена и ошибок соперника.")
 
+    if enemy_counts.get("Carry", 0) >= 2:
+        lines.append("У соперника жадный драфт с несколькими carry-функциями: не отдавайте ему бесплатное время, давите линии и объекты до поздних слотов.")
     if "Disabler" in enemy_roles:
         lines.append("У врага много контроля: core-героям заранее планировать BKB/диспел и не показываться первыми.")
     if "Escape" in enemy_roles:
@@ -457,6 +559,11 @@ def build_strategy(allies: list[Hero], enemies: list[Hero], position: str | None
         lines.append("Не обязательно начинать с самого толстого героя: ищите доступ к backline и более уязвимым целям.")
     if "Nuker" in enemy_roles and "Durable" not in ally_roles:
         lines.append("Против сильного burst без своего фронтлейна не стойте кучно и не показывайте несколько уязвимых героев одной информацией.")
+
+    if ally_counts.get("Carry", 0) >= 2:
+        lines.append("Свой драфт тоже жадный: разводите фарм по разным зонам и не принимайте ранние 5v5 без явного тайминга предметов.")
+    elif "Carry" not in ally_roles and "Nuker" in ally_roles:
+        lines.append("Позднего carry-потенциала мало: реализуйте burst через ранние убийства, башни и Roshan, не затягивая игру без причины.")
 
     if "Pusher" in ally_roles:
         lines.append("После выигранной драки сразу конвертируйте преимущество в башню, Roshan или контроль территории.")
