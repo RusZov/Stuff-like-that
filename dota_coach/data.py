@@ -14,6 +14,10 @@ OPENDOTA_HERO_STATS_URL = "https://api.opendota.com/api/heroStats"
 # OpenDota's /heroes/{id}/matchups endpoint is aggregate matchup evidence and
 # can be noticeably slower than heroStats. Treat it as optional evidence.
 OPENDOTA_MATCHUPS_URL = "https://api.opendota.com/api/heroes/{hero_id}/matchups"
+# Query one lane at a time. OpenDota's implementation caps laneRoles at 1200
+# rows; an unfiltered query can truncate hero/time buckets, while one lane is
+# comfortably below that limit for the current roster.
+OPENDOTA_LANE_ROLES_URL = "https://api.opendota.com/api/scenarios/laneRoles?lane_role={lane_role}"
 
 RANK_NAMES = {
     1: "Herald",
@@ -42,6 +46,8 @@ class Hero:
     pub_win: int = 0
     rank_picks: tuple[int, ...] = ()
     rank_wins: tuple[int, ...] = ()
+    portrait_path: str | None = None
+    icon_path: str | None = None
 
     @property
     def win_rate(self) -> float | None:
@@ -101,7 +107,7 @@ class HttpJsonClient:
         request = Request(
             url,
             headers={
-                "User-Agent": "DotaCoachMVP/0.3 (+https://github.com/RusZov/Stuff-like-that)",
+                "User-Agent": "DotaCoachMVP/0.4 (+https://github.com/RusZov/Stuff-like-that)",
                 "Accept": "application/json",
             },
         )
@@ -131,6 +137,8 @@ class DotaData:
         self.patch: str | None = None
         self.source_status: dict[str, str] = {}
         self._enemy_matchups: dict[int, dict[int, tuple[float, int]]] = {}
+        self._lane_roles: dict[tuple[int, int], tuple[int, int]] = {}
+        self._loaded_lane_roles: set[int] = set()
         self._normalised_names: dict[str, Hero] = {}
 
     def refresh(self) -> None:
@@ -191,15 +199,19 @@ class DotaData:
                     pub_win=pub_win,
                     rank_picks=rank_picks,
                     rank_wins=rank_wins,
+                    portrait_path=str(stats.get("img")) if stats.get("img") else None,
+                    icon_path=str(stats.get("icon")) if stats.get("icon") else None,
                 )
             )
 
         self.heroes = {hero.name: hero for hero in heroes}
         self.heroes_by_id = {hero.id: hero for hero in heroes}
         self._normalised_names = {self._normalise_name(hero.name): hero for hero in heroes}
-        # Matchup data is supplemental and can become stale across refreshes or
-        # a new patch. Never carry the previous matrix into a refreshed roster.
+        # Supplemental evidence can become stale across refreshes or a new
+        # patch. Never carry old matrices into a refreshed roster.
         self._enemy_matchups.clear()
+        self._lane_roles.clear()
+        self._loaded_lane_roles.clear()
         if not self.heroes:
             raise DataSourceError("No heroes could be parsed from live data")
 
@@ -256,6 +268,48 @@ class DotaData:
             return None
         enemy_win_rate, games = row
         return 1.0 - enemy_win_rate, games
+
+    def load_lane_roles(self, lane_roles: list[int] | tuple[int, ...] = (1, 2, 3)) -> None:
+        """Load aggregate OpenDota lane-role evidence without relying on a truncated all-lanes query.
+
+        OpenDota lane roles are lane assignments (1=safelane, 2=mid,
+        3=offlane), not exact farm priorities. We therefore use them only as
+        supplemental positional evidence in the scoring engine.
+        """
+        for lane_role in dict.fromkeys(lane_roles):
+            if lane_role not in {1, 2, 3}:
+                raise ValueError(f"lane_role must be 1, 2 or 3, got {lane_role!r}")
+            if lane_role in self._loaded_lane_roles:
+                continue
+            url = OPENDOTA_LANE_ROLES_URL.format(lane_role=lane_role)
+            key = f"OpenDota lane role:{lane_role}"
+            try:
+                parsed = self._parse_lane_roles(self.client.get_json(url), expected_lane_role=lane_role)
+                for hero_id, games_wins in parsed.items():
+                    self._lane_roles[(hero_id, lane_role)] = games_wins
+                self._loaded_lane_roles.add(lane_role)
+                self.source_status[key] = f"ok ({len(parsed)} heroes)"
+            except DataSourceError as exc:
+                # Like matchups, lane roles are supplemental. A transient error
+                # must not poison future attempts or break manual recommendations.
+                self.source_status[key] = f"error: {exc}"
+
+    def lane_role_sample(self, hero_id: int, lane_role: int) -> tuple[int, int] | None:
+        return self._lane_roles.get((hero_id, lane_role))
+
+    def lane_role_share(self, hero_id: int, lane_role: int) -> float | None:
+        """Share of observed lane-role scenario games in the requested lane.
+
+        A share is returned only after all three normal lane roles were loaded,
+        otherwise the denominator would be biased by missing lanes.
+        """
+        if not {1, 2, 3}.issubset(self._loaded_lane_roles):
+            return None
+        target = self._lane_roles.get((hero_id, lane_role), (0, 0))[0]
+        total = sum(self._lane_roles.get((hero_id, role), (0, 0))[0] for role in (1, 2, 3))
+        if total <= 0:
+            return None
+        return target / total
 
     @staticmethod
     def _parse_valve_heroes(payload: Any) -> list[dict[str, Any]]:
@@ -316,6 +370,31 @@ class DotaData:
             wins = min(games, max(0, wins))
             result[hero_id] = (wins / games, games)
         return result
+
+    @staticmethod
+    def _parse_lane_roles(
+        payload: Any,
+        expected_lane_role: int | None = None,
+    ) -> dict[int, tuple[int, int]]:
+        """Aggregate OpenDota lane-role time buckets into hero -> (games, wins)."""
+        if not isinstance(payload, list):
+            raise DataSourceError("Unexpected OpenDota laneRoles response")
+        totals: dict[int, list[int]] = {}
+        for row in payload:
+            if not isinstance(row, dict):
+                continue
+            hero_id = DotaData._as_int(row.get("hero_id"))
+            lane_role = DotaData._as_int(row.get("lane_role"))
+            games = max(0, DotaData._as_int(row.get("games")))
+            wins = min(games, max(0, DotaData._as_int(row.get("wins"))))
+            if hero_id <= 0 or lane_role not in {1, 2, 3} or games <= 0:
+                continue
+            if expected_lane_role is not None and lane_role != expected_lane_role:
+                continue
+            current = totals.setdefault(hero_id, [0, 0])
+            current[0] += games
+            current[1] += wins
+        return {hero_id: (values[0], min(values[0], values[1])) for hero_id, values in totals.items()}
 
     @staticmethod
     def _parse_latest_patch(payload: Any) -> str | None:
