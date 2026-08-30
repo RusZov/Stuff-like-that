@@ -47,6 +47,32 @@ def _run_health(data: DotaData) -> int:
         print("Health error: at least one OpenDota rank bucket has too little usable data", file=sys.stderr)
         return 6
 
+    optional_warnings: list[str] = []
+
+    # Lane-role data is supplemental, but unlike broad role tags it tells us
+    # where heroes are actually observed. Query lanes separately because the
+    # OpenDota implementation caps an unfiltered laneRoles query at 1200 rows.
+    data.load_lane_roles([1, 2, 3])
+    lane_coverages: dict[int, int] = {}
+    for lane_role in (1, 2, 3):
+        key = f"OpenDota lane role:{lane_role}"
+        status = data.source_status.get(key, "missing")
+        coverage = sum(
+            data.lane_role_sample(hero.id, lane_role) is not None
+            for hero in data.heroes.values()
+        )
+        lane_coverages[lane_role] = coverage
+        print(f"Lane-role {lane_role} coverage: {coverage}/{len(data.heroes)}")
+        print(f"Source {key}: {status}")
+        if status.startswith("error:"):
+            optional_warnings.append(f"lane-role {lane_role} source unavailable")
+        elif coverage < max(70, int(len(data.heroes) * 0.50)):
+            print(
+                f"Health error: OpenDota lane-role {lane_role} returned too little usable data",
+                file=sys.stderr,
+            )
+            return 8
+
     probe = data.resolve("Axe") or next(iter(data.heroes.values()))
     data.load_enemy_matchups([probe.id])
     rows = data.matchup_count(probe.id)
@@ -55,16 +81,19 @@ def _run_health(data: DotaData) -> int:
     print(f"Matchup rows for {probe.name}: {rows}")
     print(f"Source {key}: {status}")
 
-    # The matchup endpoint is optional supplemental evidence and has shown
-    # transient read timeouts in CI. A transport outage should degrade the
-    # coach, not mark otherwise healthy deterministic code as broken. If the
-    # endpoint responds successfully but its schema/data collapses, still fail.
+    # Matchups and lane roles are supplemental evidence and can have transient
+    # read failures. A transport outage should degrade recommendations, not mark
+    # otherwise healthy core data/code as broken. A successful response with a
+    # collapsed schema/coverage still fails health validation.
     if rows < 50:
         if status.startswith("error:"):
-            print("Health warning: optional OpenDota matchup source is temporarily unavailable")
-            return 0
-        print("Health error: OpenDota matchup endpoint returned too little usable data", file=sys.stderr)
-        return 5
+            optional_warnings.append("matchup source unavailable")
+        else:
+            print("Health error: OpenDota matchup endpoint returned too little usable data", file=sys.stderr)
+            return 5
+
+    for warning in optional_warnings:
+        print(f"Health warning: optional OpenDota {warning}")
     return 0
 
 
@@ -82,7 +111,7 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--allies", default="", help="Comma-separated allied hero names")
     parser.add_argument("--enemies", default="", help="Comma-separated enemy hero names")
     parser.add_argument("--limit", type=int, default=5, help="Number of recommendations")
-    parser.add_argument("--health", action="store_true", help="Validate live hero, bracket-meta and matchup data")
+    parser.add_argument("--health", action="store_true", help="Validate live hero, bracket-meta, lane-role and matchup data")
     parser.add_argument(
         "--capture-draft",
         metavar="PNG",
