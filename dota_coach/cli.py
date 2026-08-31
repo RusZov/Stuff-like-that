@@ -4,7 +4,14 @@ import argparse
 import sys
 
 from .capture import CaptureError, capture_dota_png
-from .data import DataSourceError, DotaData, Hero, RANK_NAMES
+from .data import (
+    DataSourceError,
+    DotaData,
+    Hero,
+    OPENDOTA_HERO_STATS_WINDOW_DAYS,
+    OPENDOTA_MATCHUP_WINDOW_DAYS,
+    RANK_NAMES,
+)
 from .engine import (
     build_strategy,
     normalize_position,
@@ -34,9 +41,10 @@ def _resolve_many(data: DotaData, names: list[str], label: str) -> list[Hero]:
 
 
 def _run_health(data: DotaData) -> int:
+    print(f"OpenDota heroStats window: last {OPENDOTA_HERO_STATS_WINDOW_DAYS} UTC days")
     print(f"Meta coverage: {data.meta_coverage}/{len(data.heroes)} heroes")
     if data.meta_coverage < max(100, int(len(data.heroes) * 0.75)):
-        print("Health error: OpenDota ranked meta coverage is too low", file=sys.stderr)
+        print("Health error: OpenDota public meta coverage is too low", file=sys.stderr)
         return 4
 
     bracket_coverages = [data.rank_meta_coverage(rank) for rank in RANK_NAMES]
@@ -76,8 +84,9 @@ def _run_health(data: DotaData) -> int:
     probe = data.resolve("Axe") or next(iter(data.heroes.values()))
     data.load_enemy_matchups([probe.id])
     rows = data.matchup_count(probe.id)
-    key = f"OpenDota pro matchups:{probe.id}"
+    key = f"OpenDota matchups:{probe.id}"
     status = data.source_status.get(key, "missing")
+    print(f"OpenDota matchup window: last {OPENDOTA_MATCHUP_WINDOW_DAYS} days")
     print(f"Matchup rows for {probe.name}: {rows}")
     print(f"Source {key}: {status}")
 
@@ -106,7 +115,7 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--rank",
         default="all",
-        help="all or medal: Herald, Guardian, Crusader, Archon, Legend, Ancient, Divine, Immortal",
+        help="all public or medal: Herald, Guardian, Crusader, Archon, Legend, Ancient, Divine, Immortal",
     )
     parser.add_argument("--allies", default="", help="Comma-separated allied hero names")
     parser.add_argument("--enemies", default="", help="Comma-separated enemy hero names")
@@ -152,6 +161,8 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"Heroes loaded: {len(data.heroes)}")
     print(f"Patch: {data.patch or 'unknown'}")
+    print(f"OpenDota heroStats: rolling {OPENDOTA_HERO_STATS_WINDOW_DAYS}-day window")
+    print(f"OpenDota matchups: rolling {OPENDOTA_MATCHUP_WINDOW_DAYS}-day aggregate")
     for source, status in data.source_status.items():
         print(f"Source {source}: {status}")
 
