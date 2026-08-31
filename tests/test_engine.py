@@ -220,8 +220,10 @@ class ParserTests(unittest.TestCase):
         rows = DotaData._parse_valve_heroes(payload)
         self.assertEqual(rows[0]["id"], 1)
 
-    def test_current_opendota_rank_buckets_are_aggregated(self):
+    def test_current_opendota_pub_fields_are_preferred_for_all_public(self):
         row = {
+            "pub_pick": 1000,
+            "pub_win": 540,
             "1_pick": 100,
             "1_win": 51,
             "2_pick": 200,
@@ -232,14 +234,26 @@ class ParserTests(unittest.TestCase):
             "8_win": 12,
         }
         picks, wins = DotaData._public_pick_win(row)
-        self.assertEqual(picks, 375)
-        self.assertEqual(wins, 194)
+        self.assertEqual((picks, wins), (1000, 540))
 
         rank_picks, rank_wins = DotaData._rank_pick_wins(row)
         self.assertEqual(rank_picks[0], 100)
         self.assertEqual(rank_wins[0], 51)
         self.assertEqual(rank_picks[7], 25)
         self.assertEqual(rank_wins[7], 12)
+
+    def test_rank_bucket_sum_is_fallback_when_pub_fields_are_absent(self):
+        row = {
+            "1_pick": 100,
+            "1_win": 51,
+            "2_pick": 200,
+            "2_win": 104,
+            "7_pick": 50,
+            "7_win": 27,
+            "8_pick": 25,
+            "8_win": 12,
+        }
+        self.assertEqual(DotaData._public_pick_win(row), (375, 194))
 
     def test_hero_rank_sample_uses_requested_bucket(self):
         value = hero(
@@ -255,12 +269,6 @@ class ParserTests(unittest.TestCase):
         self.assertEqual((picks, wins), (500, 300))
         self.assertAlmostEqual(value.win_rate_for_rank(5), 0.60)
 
-    def test_legacy_pub_stats_remain_supported(self):
-        self.assertEqual(
-            DotaData._public_pick_win({"pub_pick": 1000, "pub_win": 530}),
-            (1000, 530),
-        )
-
     def test_matchup_parser(self):
         rows = DotaData._parse_enemy_matchups([
             {"hero_id": 2, "games_played": 100, "wins": 55},
@@ -269,6 +277,14 @@ class ParserTests(unittest.TestCase):
         self.assertAlmostEqual(rows[2][0], 0.55)
         self.assertEqual(rows[2][1], 100)
         self.assertNotIn(3, rows)
+
+    def test_enemy_endpoint_matchup_is_inverted_for_candidate(self):
+        data = DotaData()
+        data._enemy_matchups = {1: {2: (0.55, 100)}}
+        candidate = data.candidate_win_rate_vs(2, 1)
+        self.assertIsNotNone(candidate)
+        self.assertAlmostEqual(candidate[0], 0.45)
+        self.assertEqual(candidate[1], 100)
 
     def test_lane_role_parser_aggregates_time_buckets(self):
         rows = DotaData._parse_lane_roles(
@@ -287,7 +303,7 @@ class ParserTests(unittest.TestCase):
         data = DotaData(client=client)
         data.load_enemy_matchups([1])
         self.assertEqual(data.matchup_count(1), 0)
-        self.assertTrue(data.source_status["OpenDota pro matchups:1"].startswith("error:"))
+        self.assertTrue(data.source_status["OpenDota matchups:1"].startswith("error:"))
 
         data.load_enemy_matchups([1])
         self.assertEqual(data.matchup_count(1), 1)
