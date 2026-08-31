@@ -11,8 +11,13 @@ from urllib.request import Request, urlopen
 VALVE_HERO_LIST_URL = "https://www.dota2.com/datafeed/herolist?language=english"
 VALVE_PATCH_LIST_URL = "https://www.dota2.com/datafeed/patchnoteslist"
 OPENDOTA_HERO_STATS_URL = "https://api.opendota.com/api/heroStats"
-# OpenDota's /heroes/{id}/matchups endpoint is aggregate matchup evidence and
-# can be noticeably slower than heroStats. Treat it as optional evidence.
+# OpenDota's current heroStats implementation sums seven UTC day buckets for
+# pub/turbo and medal tiers 1-8. Keep the window explicit so the UI does not
+# accidentally describe this as an all-time statistic.
+OPENDOTA_HERO_STATS_WINDOW_DAYS = 7
+# OpenDota's /heroes/{id}/matchups SQL currently filters to the last year.
+# It is aggregate matchup evidence, not bracket/position/patch-specific data.
+OPENDOTA_MATCHUP_WINDOW_DAYS = 365
 OPENDOTA_MATCHUPS_URL = "https://api.opendota.com/api/heroes/{hero_id}/matchups"
 # Query one lane at a time. OpenDota's implementation caps laneRoles at 1200
 # rows; an unfiltered query can truncate hero/time buckets, while one lane is
@@ -60,11 +65,12 @@ class Hero:
         return self._sample_confidence(self.pub_pick)
 
     def pick_win_for_rank(self, rank_tier: int | None) -> tuple[int, int]:
-        """Return picks/wins for one OpenDota medal bucket or overall.
+        """Return current OpenDota picks/wins for one medal bucket or all public.
 
-        If a requested bucket is absent in an older payload, fall back to the
-        aggregate ranked sample instead of silently treating the hero as having
-        zero games.
+        `None` uses OpenDota's explicit pub_pick/pub_win sample. A requested
+        medal bucket uses 1_pick/1_win ... 8_pick/8_win. If an older cached
+        payload lacks a requested bucket, fall back to the all-public sample
+        instead of silently treating the hero as having zero games.
         """
         if rank_tier is None:
             return self.pub_pick, self.pub_win
@@ -107,7 +113,7 @@ class HttpJsonClient:
         request = Request(
             url,
             headers={
-                "User-Agent": "DotaCoachMVP/0.4 (+https://github.com/RusZov/Stuff-like-that)",
+                "User-Agent": "DotaCoachMVP/0.5 (+https://github.com/RusZov/Stuff-like-that)",
                 "Accept": "application/json",
             },
         )
@@ -154,7 +160,7 @@ class DotaData:
 
         try:
             stats_rows = self._parse_opendota_stats(self.client.get_json(OPENDOTA_HERO_STATS_URL))
-            self.source_status["OpenDota stats"] = "ok"
+            self.source_status["OpenDota stats"] = f"ok ({OPENDOTA_HERO_STATS_WINDOW_DAYS}d window)"
         except DataSourceError as exc:
             self.source_status["OpenDota stats"] = f"error: {exc}"
 
@@ -217,7 +223,7 @@ class DotaData:
 
         meta_count = sum(hero.pub_pick > 0 for hero in heroes)
         if stats_rows and meta_count == 0:
-            self.source_status["OpenDota stats"] = "error: heroStats returned no usable ranked pick/win data"
+            self.source_status["OpenDota stats"] = "error: heroStats returned no usable public pick/win data"
 
         try:
             self.patch = self._parse_latest_patch(self.client.get_json(VALVE_PATCH_LIST_URL))
@@ -243,12 +249,12 @@ class DotaData:
             if enemy_id in self._enemy_matchups:
                 continue
             url = OPENDOTA_MATCHUPS_URL.format(hero_id=enemy_id)
-            key = f"OpenDota pro matchups:{enemy_id}"
+            key = f"OpenDota matchups:{enemy_id}"
             try:
                 payload = self.client.get_json(url)
                 rows = self._parse_enemy_matchups(payload)
                 self._enemy_matchups[enemy_id] = rows
-                self.source_status[key] = f"ok ({len(rows)} rows)"
+                self.source_status[key] = f"ok ({len(rows)} rows, {OPENDOTA_MATCHUP_WINDOW_DAYS}d window)"
             except DataSourceError as exc:
                 # Important: do not cache an empty matrix on a transient error.
                 # A later call in the same process must be allowed to retry.
@@ -258,10 +264,12 @@ class DotaData:
         return len(self._enemy_matchups.get(enemy_id, {}))
 
     def candidate_win_rate_vs(self, candidate_id: int, enemy_id: int) -> tuple[float, int] | None:
-        """Infer candidate WR vs enemy from OpenDota's queried matchup row.
+        """Infer candidate WR vs enemy from an enemy-endpoint matchup row.
 
-        This endpoint is used as supplemental aggregate matchup evidence, not
-        as a position- or bracket-specific current-public truth source.
+        The OpenDota SQL counts wins for the *queried* hero. We query each
+        visible enemy once for efficiency, so the stored row is enemy WR versus
+        candidate and must be inverted here. The upstream query currently uses
+        the last year of matches and is not bracket/position/patch-specific.
         """
         row = self._enemy_matchups.get(enemy_id, {}).get(candidate_id)
         if row is None:
@@ -340,18 +348,23 @@ class DotaData:
 
     @staticmethod
     def _public_pick_win(row: dict[str, Any]) -> tuple[int, int]:
-        """Return aggregate ranked public picks/wins from OpenDota heroStats."""
+        """Return OpenDota's explicit all-public picks/wins for the current 7d window.
+
+        Current heroStats has dedicated pub_pick/pub_win fields. Summing medal
+        buckets is only a compatibility fallback because it represents ranked
+        medal buckets rather than the explicit all-public population.
+        """
+        pub_pick = max(0, DotaData._as_int(row.get("pub_pick")))
+        pub_win = min(pub_pick, max(0, DotaData._as_int(row.get("pub_win"))))
+        if pub_pick > 0:
+            return pub_pick, pub_win
+
+        # Compatibility fallback for old/cached payloads without pub_* fields.
         rank_picks, rank_wins = DotaData._rank_pick_wins(row)
         ranked_pick = sum(rank_picks)
         ranked_win = sum(rank_wins)
         if ranked_pick > 0:
             return ranked_pick, min(ranked_pick, max(0, ranked_win))
-
-        # Compatibility fallback for old/cached OpenDota payloads.
-        pub_pick = DotaData._as_int(row.get("pub_pick"))
-        pub_win = DotaData._as_int(row.get("pub_win"))
-        if pub_pick > 0:
-            return pub_pick, min(pub_pick, max(0, pub_win))
         return 0, 0
 
     @staticmethod
