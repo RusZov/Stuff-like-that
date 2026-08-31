@@ -16,7 +16,6 @@ from .engine import (
     build_strategy,
     normalize_position,
     normalize_rank_tier,
-    rank_label,
     recommend,
     validate_draft,
 )
@@ -179,8 +178,13 @@ def main(argv: list[str] | None = None) -> int:
 
     data.load_enemy_matchups([hero.id for hero in enemies])
 
+    meta_sample = (
+        f"All public ({OPENDOTA_HERO_STATS_WINDOW_DAYS}d)"
+        if rank_tier is None
+        else f"{RANK_NAMES[rank_tier]} ({OPENDOTA_HERO_STATS_WINDOW_DAYS}d)"
+    )
     print(f"\nRole: {position}")
-    print(f"Meta bracket: {rank_label(rank_tier)}")
+    print(f"Meta sample: {meta_sample}")
     if allies:
         print("Allies: " + ", ".join(hero.name for hero in allies))
     if enemies:
