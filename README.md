@@ -5,11 +5,11 @@ Clean restart of the project after removing the unreliable full-screen `cv2.matc
 ## What works now
 
 - Loads the hero roster from Valve's Dota 2 datafeed.
-- Merges current OpenDota ranked public pick/win statistics from medal buckets `1_pick..8_pick` and `1_win..8_win`.
-- Can score the meta for a selected bracket: Herald, Guardian, Crusader, Archon, Legend, Ancient, Divine or Immortal; `all` remains the default.
+- Uses OpenDota's explicit rolling **7-day** `pub_pick/pub_win` sample for the default `all` meta instead of incorrectly summing medal buckets.
+- Can score the same rolling 7-day meta for a selected bracket using `1_pick..8_pick` and `1_win..8_win`: Herald, Guardian, Crusader, Archon, Legend, Ancient, Divine or Immortal.
 - Loads OpenDota `scenarios/laneRoles` per lane and uses observed safelane/mid/offlane shares as supplemental position evidence instead of relying only on broad `Carry`/`Support`/`Nuker` tags.
 - Queries lane roles separately because OpenDota's implementation limits the lane-role query to 1200 rows; this avoids silently truncating a combined all-lanes sample.
-- Uses OpenDota hero matchup rows only as optional supplemental aggregate matchup evidence.
+- Uses OpenDota hero matchup rows only as optional supplemental aggregate evidence. The upstream endpoint currently covers the **last year**, so it is not presented as patch-, role- or bracket-specific truth.
 - Scores candidates separately for positions 1-5 with explicit position-profile gates, diminishing returns for multi-tag heroes, capped team-gap bonuses and mild redundancy penalties. This prevents flexible heroes from reaching `99` simply because they have many generic tags.
 - Accounts for visible team-role gaps, selected-bracket win rate, sample size, observed lane share, optional matchup evidence, and a deliberately weak composition fallback.
 - Rejects impossible manual drafts such as the same hero appearing on both teams or more than five heroes per team.
@@ -28,13 +28,15 @@ Python 3.11+ is enough for the manual-draft engine.
 python -m dota_coach.cli --role mid --rank legend --allies "Axe,Crystal Maiden" --enemies "Puck,Juggernaut" --limit 5
 ```
 
-Available rank selectors: `all`, `herald`, `guardian`, `crusader`, `archon`, `legend`, `ancient`, `divine`, `immortal` (or numbers 1-8).
+Available rank selectors: `all`, `herald`, `guardian`, `crusader`, `archon`, `legend`, `ancient`, `divine`, `immortal` (or numbers 1-8). `all` means OpenDota's explicit all-public sample, not a sum of medal buckets.
 
 Validate hero roster, rank-bucket meta coverage, lane-role evidence and the optional matchup source:
 
 ```bash
 python -m dota_coach.cli --health
 ```
+
+The CLI prints the source windows explicitly: `heroStats` is a rolling 7-day sample and hero matchups are a rolling one-year aggregate according to the current upstream OpenDota implementation.
 
 Install the command locally:
 
@@ -65,11 +67,13 @@ dota-coach --capture-draft captures/draft_169.png
 - OpenDota lane roles: `https://api.opendota.com/api/scenarios/laneRoles?lane_role={lane_role}`
 - OpenDota matchups: `https://api.opendota.com/api/heroes/{hero_id}/matchups`
 
-OpenDota's current `heroStats` response defines medal-specific fields: `1_*` Herald, `2_*` Guardian, `3_*` Crusader, `4_*` Archon, `5_*` Legend, `6_*` Ancient, `7_*` Divine, `8_*` Immortal. The loader stores all eight samples and also aggregates them for the default `all` mode. Legacy `pub_pick/pub_win` fields remain only as a compatibility fallback. The same response provides `img` and `icon` reference paths used as classifier groundwork.
+OpenDota's current `heroStats` implementation sums seven UTC day buckets. It exposes explicit `pub_pick/pub_win` fields for the all-public population and medal-specific fields `1_*` Herald, `2_*` Guardian, `3_*` Crusader, `4_*` Archon, `5_*` Legend, `6_*` Ancient, `7_*` Divine, `8_*` Immortal. Dota Coach now keeps those populations separate: default `all` uses `pub_*`, while a selected medal uses its own tier bucket. Summing tier buckets remains only a compatibility fallback for old/cached payloads that do not contain `pub_*`. The same response provides `img` and `icon` reference paths used as classifier groundwork.
 
-`scenarios/laneRoles` provides `hero_id`, `lane_role`, `time`, `games` and `wins`. Dota Coach aggregates the time buckets per hero/lane and uses lane share only after all three normal lane samples are available, preventing a partial response from creating a biased denominator. Lane-role data is aggregate and does not distinguish position 1 from 5 or position 3 from 4, so explicit role tags still decide farm-priority fit while lane data acts only as supporting evidence.
+`scenarios/laneRoles` provides `hero_id`, `lane_role`, `time`, `games` and `wins`. Dota Coach aggregates the time buckets per hero/lane and uses lane share only after all three normal lane samples are available, preventing a partial response from creating a biased denominator. Lane-role data is aggregate and does not distinguish position 1 from 5 or position 3 from 4, so explicit role tags still decide farm-priority fit while lane data acts only as supporting evidence. The upstream query currently has `LIMIT 1200`, which is why Dota Coach requests one lane at a time.
 
-The hero matchup endpoint is not treated as selected-bracket or role-specific current-pub truth. Its signal is capped below position fit and labeled as aggregate matchup evidence. If optional OpenDota lane-role or matchup endpoints time out, recommendations fall back to role fit, bracket meta, team gaps and composition evidence.
+The hero matchup endpoint currently queries matches from the last year. Its `wins` field belongs to the hero whose endpoint was requested. Dota Coach requests each visible enemy once, stores that enemy's results versus every opposing hero, and inverts the queried enemy's win rate to obtain candidate-vs-enemy evidence. This keeps network calls low while preserving the endpoint's direction correctly. Matchup influence is capped below position fit because the source is not role-, medal- or current-patch-specific.
+
+If optional OpenDota lane-role or matchup endpoints time out, recommendations fall back to role fit, 7-day meta, team gaps and composition evidence.
 
 ## Architecture
 
@@ -87,7 +91,7 @@ manual draft input                         Windows Dota window
       +-------------------- future recognized picks/bans
       |
       v
-Valve roster + OpenDota medal meta + lane-role scenarios
+Valve roster + OpenDota 7d public/medal meta + lane-role scenarios
       |
       v
 normalized Hero model (+ portrait/icon reference paths)
@@ -95,9 +99,9 @@ normalized Hero model (+ portrait/icon reference paths)
       +--> position profile gate + weighted role fit
       +--> observed lane-role share
       +--> team role gaps + redundancy control
-      +--> selected-bracket WR + sample confidence
+      +--> selected 7d public/medal WR + sample confidence
       +--> weak enemy-role fallback
-      +--> capped optional OpenDota matchup evidence
+      +--> capped optional 1y aggregate matchup evidence
       |
       v
 ranked picks + position-aware tactical notes
@@ -109,7 +113,7 @@ ranked picks + position-aware tactical notes
 python -m unittest discover -s tests -v
 ```
 
-GitHub Actions runs deterministic tests on Linux and Windows. Tests cover position/rank scoring, lane-role parsing and scoring, score-saturation regression, matchup fallbacks, draft validation, tactics and exact Dota-window selection. Linux verifies live Valve/OpenDota core sources plus lane-role coverage. Windows installs the capture extra and verifies that the installed capture backend exposes exact `window_hwnd` targeting.
+GitHub Actions runs deterministic tests on Linux and Windows. Tests cover position/rank scoring, correct `pub_*` vs medal-bucket semantics, matchup direction inversion, lane-role parsing and scoring, score-saturation regression, matchup fallbacks, draft validation, tactics and exact Dota-window selection. Linux verifies live Valve/OpenDota core sources plus lane-role coverage. Windows installs the capture extra and verifies that the installed capture backend exposes exact `window_hwnd` targeting.
 
 ## Next concrete step
 
