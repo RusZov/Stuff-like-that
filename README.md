@@ -26,11 +26,11 @@ Use `coach_draft()` for application code. It is the integration boundary for the
 from dota_coach.data import DotaData
 from dota_coach.service import coach_draft
 
- data = DotaData()
- data.refresh()
- allies = [data.resolve("Crystal Maiden")]
- enemies = [data.resolve("Axe")]
- result = coach_draft(data, allies, enemies, "mid", limit=5, rank_tier="legend")
+data = DotaData()
+data.refresh()
+allies = [data.resolve("Crystal Maiden")]
+enemies = [data.resolve("Axe")]
+result = coach_draft(data, allies, enemies, "mid", limit=5, rank_tier="legend")
 
 for pick in result.picks:
     print(pick.hero, pick.score, pick.confidence)
