@@ -4,23 +4,41 @@ Clean restart of the project after removing the unreliable full-screen `cv2.matc
 
 ## What works now
 
-- Loads the hero roster from Valve's Dota 2 datafeed.
-- Uses OpenDota's explicit rolling **7-day** `pub_pick/pub_win` sample for the default `all` meta instead of incorrectly summing medal buckets.
-- Can score the same rolling 7-day meta for a selected bracket using `1_pick..8_pick` and `1_win..8_win`: Herald, Guardian, Crusader, Archon, Legend, Ancient, Divine or Immortal.
-- Loads OpenDota `scenarios/laneRoles` per lane and uses observed safelane/mid/offlane shares as supplemental position evidence instead of relying only on broad `Carry`/`Support`/`Nuker` tags.
-- Queries lane roles separately because OpenDota's implementation limits the lane-role query to 1200 rows; this avoids silently truncating a combined all-lanes sample.
-- Uses OpenDota hero matchup rows only as optional supplemental aggregate evidence. The upstream endpoint currently covers the **last year**, so it is not presented as patch-, role- or bracket-specific truth.
-- Scores candidates separately for positions 1-5 with explicit position-profile gates, diminishing returns for multi-tag heroes, capped team-gap bonuses and mild redundancy penalties. This prevents flexible heroes from reaching `99` simply because they have many generic tags.
-- Accounts for visible team-role gaps, selected-bracket win rate, sample size, observed lane share, optional matchup evidence, and a deliberately weak composition fallback.
-- Rejects impossible manual drafts such as the same hero appearing on both teams or more than five heroes per team.
-- Produces short draft tactics from the visible composition plus a position-specific lane plan. It also calls out greedy multi-carry drafts and drafts that lack late carry potential.
-- Retries transient API failures and does not permanently cache failed matchup/lane-role requests as empty matrices.
-- Preserves OpenDota `img` and `icon` references on each `Hero` as reference assets for the upcoming portrait classifier.
-- Has a Windows capture foundation that enumerates real top-level windows, resolves the Dota window to an HWND, and captures that exact HWND through Windows Graphics Capture.
-- Can save a real Dota client frame directly to PNG for draft-layout calibration without calling Valve/OpenDota and without OpenCV.
-- Does **not** capture the whole desktop and does **not** pretend to recognize moving 3D heroes with template matching.
+- Loads the canonical hero roster and current patch label from Valve's Dota 2 datafeed.
+- Uses OpenDota's rolling **7-day** `pub_pick/pub_win` sample for the default public meta.
+- Supports medal-specific 7-day samples through `1_pick..8_pick` / `1_win..8_win`: Herald through Immortal.
+- Loads OpenDota `scenarios/laneRoles` one lane at a time and uses observed safelane/mid/offlane share as supplemental position evidence.
+- Uses OpenDota `/heroes/{id}/matchups` only as **supplemental pro/league evidence**. Current upstream SQL joins `leagues`, so this source must not be presented as public-bracket matchup truth. Its influence is deliberately capped.
+- Scores positions 1-5 separately with explicit position-profile gates, diminishing returns for generic multi-role tags, team-gap bonuses, redundancy penalties, lane-role evidence and selected-bracket meta.
+- Rejects impossible drafts: duplicate heroes, cross-team overlap and more than five heroes per side.
+- Produces position-aware tactics from the visible composition and calls out missing control, missing initiation, greedy multi-core drafts, push pressure and other broad draft risks.
+- Retries transient API failures and degrades gracefully when optional lane-role or matchup evidence is unavailable.
+- Preserves OpenDota hero portrait/icon paths for the upcoming portrait classifier.
+- Captures the exact Dota window on Windows through its HWND using Windows Graphics Capture; it does not capture the whole desktop.
+- Saves exact-window PNG frames with `--capture-draft` for layout calibration.
+- Includes a normalized `DraftLayout` model for future pick/ban slot calibration. No guessed Dota coordinates are hardcoded.
 
-## Run
+## High-level MVP API
+
+Use `coach_draft()` for application code. It is the integration boundary for the CLI and the future screen reader: it automatically preloads optional lane-role and enemy-matchup evidence, runs recommendation scoring, calibrates extreme scores by confidence, produces tactics and returns source warnings/provenance.
+
+```python
+from dota_coach.data import DotaData
+from dota_coach.service import coach_draft
+
+ data = DotaData()
+ data.refresh()
+ allies = [data.resolve("Crystal Maiden")]
+ enemies = [data.resolve("Axe")]
+ result = coach_draft(data, allies, enemies, "mid", limit=5, rank_tier="legend")
+
+for pick in result.picks:
+    print(pick.hero, pick.score, pick.confidence)
+```
+
+The lower-level `recommend()` remains available for deterministic engine testing, but application code should prefer `coach_draft()` so optional evidence is not accidentally skipped.
+
+## CLI
 
 Python 3.11+ is enough for the manual-draft engine.
 
@@ -28,83 +46,82 @@ Python 3.11+ is enough for the manual-draft engine.
 python -m dota_coach.cli --role mid --rank legend --allies "Axe,Crystal Maiden" --enemies "Puck,Juggernaut" --limit 5
 ```
 
-Available rank selectors: `all`, `herald`, `guardian`, `crusader`, `archon`, `legend`, `ancient`, `divine`, `immortal` (or numbers 1-8). `all` means OpenDota's explicit all-public sample, not a sum of medal buckets.
+Rank selectors: `all`, `herald`, `guardian`, `crusader`, `archon`, `legend`, `ancient`, `divine`, `immortal` or numbers 1-8. `all` means OpenDota's explicit all-public sample, not a sum of medal buckets.
 
-Validate hero roster, rank-bucket meta coverage, lane-role evidence and the optional matchup source:
+Validate live sources:
 
 ```bash
 python -m dota_coach.cli --health
 ```
 
-The CLI prints the source windows explicitly: `heroStats` is a rolling 7-day sample and hero matchups are a rolling one-year aggregate according to the current upstream OpenDota implementation.
-
-Install the command locally:
+Install locally:
 
 ```bash
 python -m pip install -e .
 dota-coach --role 3 --rank ancient --enemies "Puck,Anti-Mage"
 ```
 
-For Windows HWND capture support:
+For exact-HWND Windows capture:
 
 ```bash
 python -m pip install -e ".[capture]"
-```
-
-While the real Dota draft screen is open, save an exact-window calibration frame:
-
-```bash
 dota-coach --capture-draft captures/draft_169.png
 ```
 
-`--capture-draft` resolves the visible Dota window, targets its exact HWND through Windows Graphics Capture, and calls the capture backend's native `Frame.save_as_image()` while the frame is valid. It deliberately bypasses network data loading so screenshot collection still works if Valve/OpenDota is unavailable.
+`--capture-draft` resolves a visible Dota window and targets its HWND directly. It deliberately bypasses network data loading so calibration screenshots can still be captured if Valve/OpenDota is unavailable.
 
-## Data sources
+## Data-source semantics
 
-- Valve hero roster: `https://www.dota2.com/datafeed/herolist?language=english`
+- Valve heroes: `https://www.dota2.com/datafeed/herolist?language=english`
 - Valve patch list: `https://www.dota2.com/datafeed/patchnoteslist`
 - OpenDota hero stats: `https://api.opendota.com/api/heroStats`
 - OpenDota lane roles: `https://api.opendota.com/api/scenarios/laneRoles?lane_role={lane_role}`
 - OpenDota matchups: `https://api.opendota.com/api/heroes/{hero_id}/matchups`
 
-OpenDota's current `heroStats` implementation sums seven UTC day buckets. It exposes explicit `pub_pick/pub_win` fields for the all-public population and medal-specific fields `1_*` Herald, `2_*` Guardian, `3_*` Crusader, `4_*` Archon, `5_*` Legend, `6_*` Ancient, `7_*` Divine, `8_*` Immortal. Dota Coach now keeps those populations separate: default `all` uses `pub_*`, while a selected medal uses its own tier bucket. Summing tier buckets remains only a compatibility fallback for old/cached payloads that do not contain `pub_*`. The same response provides `img` and `icon` reference paths used as classifier groundwork.
+OpenDota `heroStats` currently exposes explicit `pub_pick/pub_win` plus medal fields `1_*..8_*` from a short rolling window. Dota Coach keeps those populations separate. Summing medal buckets is only a compatibility fallback for old/cached payloads that lack `pub_*`.
 
-`scenarios/laneRoles` provides `hero_id`, `lane_role`, `time`, `games` and `wins`. Dota Coach aggregates the time buckets per hero/lane and uses lane share only after all three normal lane samples are available, preventing a partial response from creating a biased denominator. Lane-role data is aggregate and does not distinguish position 1 from 5 or position 3 from 4, so explicit role tags still decide farm-priority fit while lane data acts only as supporting evidence. The upstream query currently has `LIMIT 1200`, which is why Dota Coach requests one lane at a time.
+`scenarios/laneRoles` is lane assignment, not exact farm priority. The engine therefore treats it as supporting evidence rather than declaring position 1 vs 5 or position 3 vs 4 from lane alone. Requests are split by lane because the current upstream query is limited to 1200 rows.
 
-The hero matchup endpoint currently queries matches from the last year. Its `wins` field belongs to the hero whose endpoint was requested. Dota Coach requests each visible enemy once, stores that enemy's results versus every opposing hero, and inverts the queried enemy's win rate to obtain candidate-vs-enemy evidence. This keeps network calls low while preserving the endpoint's direction correctly. Matchup influence is capped below position fit because the source is not role-, medal- or current-patch-specific.
+The OpenDota hero matchup route currently joins `leagues`, so its rows are pro/league evidence rather than bracket-specific public matchup statistics. `wins` belongs to the hero whose endpoint was requested. Dota Coach requests each visible enemy once and inverts that enemy win rate to estimate candidate-vs-enemy evidence. This signal remains below position/meta evidence because its population is different from the user's public bracket and it is not role-specific.
 
-If optional OpenDota lane-role or matchup endpoints time out, recommendations fall back to role fit, 7-day meta, team gaps and composition evidence.
+## Draft-layout calibration foundation
+
+`dota_coach/draft_layout.py` now provides:
+
+- normalized rectangles in frame-relative coordinates;
+- pick/ban slot IDs and team labels;
+- aspect-ratio guards so a 16:9 calibration is not silently applied to a 16:10 frame;
+- normalized-to-pixel conversion;
+- JSON save/load for measured calibration profiles.
+
+There are intentionally **no real Dota ROI coordinates yet**. They will be measured from current exact-HWND screenshots rather than guessed from old screenshots or desktop coordinates.
 
 ## Architecture
 
 ```text
-manual draft input                         Windows Dota window
-      |                                          |
-      |                                    HWND enumeration
-      |                                          |
-      |                                    WGC exact-window frame
-      |                                          |
-      |                                    PNG calibration capture
-      |                                          |
-      |                                  [next: draft layout/ROIs]
-      |                                          |
-      +-------------------- future recognized picks/bans
+manual draft input                     exact Dota HWND frame
+      |                                       |
+      |                                  DraftLayout profile
+      |                                       |
+      |                           [next: anchor validator + crops]
+      |                                       |
+      +---------------- future recognized slot -> hero + confidence
       |
       v
-Valve roster + OpenDota 7d public/medal meta + lane-role scenarios
+Valve roster + OpenDota 7d public/medal meta + lane-role + optional pro/league matchup
       |
       v
-normalized Hero model (+ portrait/icon reference paths)
+coach_draft()
       |
-      +--> position profile gate + weighted role fit
-      +--> observed lane-role share
-      +--> team role gaps + redundancy control
-      +--> selected 7d public/medal WR + sample confidence
-      +--> weak enemy-role fallback
-      +--> capped optional 1y aggregate matchup evidence
+      +--> position/role fit
+      +--> observed lane share
+      +--> team gaps/redundancy
+      +--> selected-bracket meta + sample confidence
+      +--> capped enemy composition / matchup evidence
+      +--> confidence calibration
       |
       v
-ranked picks + position-aware tactical notes
+ranked picks + warnings + tactics + source provenance
 ```
 
 ## Tests
@@ -113,18 +130,18 @@ ranked picks + position-aware tactical notes
 python -m unittest discover -s tests -v
 ```
 
-GitHub Actions runs deterministic tests on Linux and Windows. Tests cover position/rank scoring, correct `pub_*` vs medal-bucket semantics, matchup direction inversion, lane-role parsing and scoring, score-saturation regression, matchup fallbacks, draft validation, tactics and exact Dota-window selection. Linux verifies live Valve/OpenDota core sources plus lane-role coverage. Windows installs the capture extra and verifies that the installed capture backend exposes exact `window_hwnd` targeting.
+GitHub Actions runs unit/compile checks on Linux and Windows, validates the exact-HWND capture dependency on Windows, validates live Valve/OpenDota coverage on Linux and smoke-tests the high-level `coach_draft()` service against live data.
 
 ## Next concrete step
 
-Continue issue **MVP-2: draft-screen ingestion without full-screen template matching** with the layout/classification slice:
+Continue issue **MVP-2: draft-screen ingestion without full-screen template matching**:
 
-1. Use `dota-coach --capture-draft ...` to collect current draft-screen frames at **16:9** and **16:10** from the exact Dota HWND.
-2. Define normalized draft-layout anchors and pick/ban portrait ROIs from those real frames; do not hard-code desktop coordinates.
-3. Add a layout validator that rejects non-draft screens before hero recognition.
-4. Build a dedicated portrait classifier/embedding index using the current OpenDota `img`/`icon` reference paths; do not search the moving world scene.
-5. Return `slot -> hero + confidence`, and feed only high-confidence picks/bans into the existing engine.
+1. Capture one current draft frame at **16:9** and one at **16:10** using `dota-coach --capture-draft`.
+2. Measure stable UI anchors plus pick/ban portrait rectangles into two `DraftLayout` JSON fixtures.
+3. Add a validator that chooses a profile by aspect ratio plus anchor evidence and rejects non-draft screens.
+4. Build a dedicated portrait classifier/embedding index from the stored OpenDota `Hero.img` / `Hero.icon` references.
+5. Return `slot -> hero + confidence` and feed only high-confidence slots into `coach_draft()`.
 6. Keep manual selection as fallback for low-confidence/unknown slots.
-7. Add saved-frame regression tests for at least 16:9 and 16:10 before building any live overlay.
+7. Add saved-frame regression tests for both aspect ratios before any live overlay work.
 
-The remaining blocker for automatic draft ingestion is representative current draft-screen imagery. The project already contains the exact-HWND PNG capture command needed to obtain those frames without guessing ROI coordinates.
+The remaining blocker for automatic draft ingestion is representative current draft-screen imagery, not screen capture or engine architecture.
