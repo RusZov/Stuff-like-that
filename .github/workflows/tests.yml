@@ -29,7 +29,7 @@ jobs:
       - name: Validate live Valve/OpenDota sources
         if: runner.os == 'Linux'
         run: python -m dota_coach.cli --health
-      - name: Live recommendation smoke test
+      - name: Live coaching service smoke test
         if: runner.os == 'Linux'
         run: |
-          python -c "from dota_coach.data import DotaData; from dota_coach.engine import recommend; d=DotaData(); d.refresh(); picks=recommend(d, [], [], '2', limit=5, rank_tier='legend'); assert len(picks)==5; assert len({p.hero for p in picks})==5; assert all(picks[i].score >= picks[i+1].score for i in range(len(picks)-1)); print([(p.hero, p.score, p.confidence) for p in picks])"
+          python -c "from dota_coach.data import DotaData; from dota_coach.service import coach_draft; d=DotaData(); d.refresh(); cm=d.resolve('Crystal Maiden'); axe=d.resolve('Axe'); assert cm and axe; result=coach_draft(d, [cm], [axe], '2', limit=5, rank_tier='legend'); picks=list(result.picks); assert len(picks)==5; assert len({p.hero for p in picks})==5; assert all(picks[i].score >= picks[i+1].score for i in range(len(picks)-1)); assert any('pro/league' in note for note in result.source_notes); print([(p.hero, p.score, p.confidence) for p in picks]); print(result.warnings)"
