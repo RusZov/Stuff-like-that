@@ -78,6 +78,7 @@ def coach_draft(
     position = normalize_position(position)
     rank_tier = normalize_rank_tier(rank_tier)
     validate_draft(allies, enemies)
+    limit = max(1, int(limit))
 
     warnings: list[str] = []
 
@@ -97,15 +98,18 @@ def coach_draft(
             if status.startswith("error:"):
                 warnings.append(f"matchup-данные для {enemy.name} недоступны; использованы только состав и мета")
 
-    raw = recommend(data, allies, enemies, position, limit=max(1, limit), rank_tier=rank_tier)
-    picks = sorted((_calibrate_pick(pick) for pick in raw), key=lambda p: (-p.score, -p.confidence, p.hero))
+    # Confidence calibration is candidate-specific and can legitimately reorder
+    # close raw scores. Therefore calibrate the complete available candidate pool
+    # before applying the user-facing top-N cutoff; truncating first could hide a
+    # better high-confidence pick just below the raw-score boundary.
+    hero_count = len(getattr(data, "heroes", {}))
+    pool_limit = max(limit, hero_count)
+    raw = recommend(data, allies, enemies, position, limit=pool_limit, rank_tier=rank_tier)
+    picks = sorted((_calibrate_pick(pick) for pick in raw), key=lambda p: (-p.score, -p.confidence, p.hero))[:limit]
 
     relabeled: list[Pick] = []
     for pick in picks:
-        reasons = tuple(
-            reason.replace("aggregate-матчап", "pro/league матчап")
-            for reason in pick.reasons
-        )
+        reasons = tuple(reason.replace("aggregate-матчап", "pro/league матчап") for reason in pick.reasons)
         relabeled.append(Pick(pick.hero, pick.score, pick.confidence, reasons))
 
     tactics = build_strategy(allies, enemies, position)
