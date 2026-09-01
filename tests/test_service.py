@@ -1,6 +1,8 @@
 import unittest
+from unittest.mock import patch
 
 from dota_coach.data import Hero
+from dota_coach.engine import Pick
 from dota_coach.service import coach_draft
 
 
@@ -76,9 +78,19 @@ class DraftCoachServiceTests(unittest.TestCase):
         data = ServiceData([sparse, self.sf])
         result = coach_draft(data, [], [], "mid", 2)
         pick = next(item for item in result.picks if item.hero == "Sparse Mid")
-        # The service should not expose the raw additive score as equally certain
-        # when almost no statistical evidence exists.
         self.assertLess(pick.score, 80.0)
+
+    def test_confidence_calibration_happens_before_top_n_cutoff(self):
+        data = ServiceData(self.heroes[:3])
+        raw = [
+            Pick("Low Confidence Raw Winner", 80.0, 0.0, ("raw",)),
+            Pick("High Confidence Better Pick", 75.0, 1.0, ("raw",)),
+            Pick("Third", 60.0, 1.0, ("raw",)),
+        ]
+        with patch("dota_coach.service.recommend", return_value=raw) as mocked:
+            result = coach_draft(data, [], [], "mid", limit=1)
+        self.assertEqual(mocked.call_args.kwargs["limit"], 3)
+        self.assertEqual(result.picks[0].hero, "High Confidence Better Pick")
 
     def test_tactics_add_mobile_enemy_control_warning(self):
         mobile2 = hero(30, "Mobile Two", ["Escape", "Carry"], 0.50)
