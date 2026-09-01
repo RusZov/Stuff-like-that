@@ -12,13 +12,8 @@ from .data import (
     OPENDOTA_MATCHUP_WINDOW_DAYS,
     RANK_NAMES,
 )
-from .engine import (
-    build_strategy,
-    normalize_position,
-    normalize_rank_tier,
-    recommend,
-    validate_draft,
-)
+from .engine import normalize_position, normalize_rank_tier, validate_draft
+from .service import coach_draft
 
 
 def _csv(value: str) -> list[str]:
@@ -29,11 +24,11 @@ def _resolve_many(data: DotaData, names: list[str], label: str) -> list[Hero]:
     heroes: list[Hero] = []
     missing: list[str] = []
     for name in names:
-        hero = data.resolve(name)
-        if hero is None:
+        resolved = data.resolve(name)
+        if resolved is None:
             missing.append(name)
         else:
-            heroes.append(hero)
+            heroes.append(resolved)
     if missing:
         raise ValueError(f"Unknown {label}: {', '.join(missing)}")
     return heroes
@@ -47,37 +42,28 @@ def _run_health(data: DotaData) -> int:
         return 4
 
     bracket_coverages = [data.rank_meta_coverage(rank) for rank in RANK_NAMES]
-    print("Bracket coverage: " + ", ".join(
-        f"{RANK_NAMES[rank]}={bracket_coverages[rank - 1]}" for rank in RANK_NAMES
-    ))
+    print(
+        "Bracket coverage: "
+        + ", ".join(f"{RANK_NAMES[rank]}={bracket_coverages[rank - 1]}" for rank in RANK_NAMES)
+    )
     if min(bracket_coverages) < max(90, int(len(data.heroes) * 0.65)):
         print("Health error: at least one OpenDota rank bucket has too little usable data", file=sys.stderr)
         return 6
 
     optional_warnings: list[str] = []
-
-    # Lane-role data is supplemental, but unlike broad role tags it tells us
-    # where heroes are actually observed. Query lanes separately because the
-    # OpenDota implementation caps an unfiltered laneRoles query at 1200 rows.
     data.load_lane_roles([1, 2, 3])
-    lane_coverages: dict[int, int] = {}
     for lane_role in (1, 2, 3):
         key = f"OpenDota lane role:{lane_role}"
         status = data.source_status.get(key, "missing")
         coverage = sum(
-            data.lane_role_sample(hero.id, lane_role) is not None
-            for hero in data.heroes.values()
+            data.lane_role_sample(hero.id, lane_role) is not None for hero in data.heroes.values()
         )
-        lane_coverages[lane_role] = coverage
         print(f"Lane-role {lane_role} coverage: {coverage}/{len(data.heroes)}")
         print(f"Source {key}: {status}")
         if status.startswith("error:"):
             optional_warnings.append(f"lane-role {lane_role} source unavailable")
         elif coverage < max(70, int(len(data.heroes) * 0.50)):
-            print(
-                f"Health error: OpenDota lane-role {lane_role} returned too little usable data",
-                file=sys.stderr,
-            )
+            print(f"Health error: OpenDota lane-role {lane_role} returned too little usable data", file=sys.stderr)
             return 8
 
     probe = data.resolve("Axe") or next(iter(data.heroes.values()))
@@ -85,14 +71,12 @@ def _run_health(data: DotaData) -> int:
     rows = data.matchup_count(probe.id)
     key = f"OpenDota matchups:{probe.id}"
     status = data.source_status.get(key, "missing")
-    print(f"OpenDota matchup window: last {OPENDOTA_MATCHUP_WINDOW_DAYS} days")
+    print(
+        f"OpenDota matchup source: pro/league matches, roughly last {OPENDOTA_MATCHUP_WINDOW_DAYS} days"
+    )
     print(f"Matchup rows for {probe.name}: {rows}")
     print(f"Source {key}: {status}")
 
-    # Matchups and lane roles are supplemental evidence and can have transient
-    # read failures. A transport outage should degrade recommendations, not mark
-    # otherwise healthy core data/code as broken. A successful response with a
-    # collapsed schema/coverage still fails health validation.
     if rows < 50:
         if status.startswith("error:"):
             optional_warnings.append("matchup source unavailable")
@@ -160,8 +144,10 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"Heroes loaded: {len(data.heroes)}")
     print(f"Patch: {data.patch or 'unknown'}")
-    print(f"OpenDota heroStats: rolling {OPENDOTA_HERO_STATS_WINDOW_DAYS}-day window")
-    print(f"OpenDota matchups: rolling {OPENDOTA_MATCHUP_WINDOW_DAYS}-day aggregate")
+    print(f"OpenDota heroStats: rolling {OPENDOTA_HERO_STATS_WINDOW_DAYS}-day public/medal sample")
+    print(
+        f"OpenDota matchups: supplemental pro/league sample, roughly {OPENDOTA_MATCHUP_WINDOW_DAYS} days"
+    )
     for source, status in data.source_status.items():
         print(f"Source {source}: {status}")
 
@@ -176,8 +162,6 @@ def main(argv: list[str] | None = None) -> int:
         print(str(exc), file=sys.stderr)
         return 2
 
-    data.load_enemy_matchups([hero.id for hero in enemies])
-
     meta_sample = (
         f"All public ({OPENDOTA_HERO_STATS_WINDOW_DAYS}d)"
         if rank_tier is None
@@ -190,17 +174,26 @@ def main(argv: list[str] | None = None) -> int:
     if enemies:
         print("Enemies: " + ", ".join(hero.name for hero in enemies))
 
+    result = coach_draft(data, allies, enemies, position, args.limit, rank_tier)
+
     print("\nRecommendations")
-    for index, pick in enumerate(
-        recommend(data, allies, enemies, position, args.limit, rank_tier), start=1
-    ):
+    for index, pick in enumerate(result.picks, start=1):
         print(f"{index}. {pick.hero}: score={pick.score:.2f}, confidence={pick.confidence:.0%}")
         for reason in pick.reasons:
             print(f"   - {reason}")
 
+    if result.warnings:
+        print("\nData warnings")
+        for warning in result.warnings:
+            print(f"- {warning}")
+
     print("\nTactics")
-    for line in build_strategy(allies, enemies, position):
+    for line in result.tactics:
         print(f"- {line}")
+
+    print("\nData provenance")
+    for note in result.source_notes:
+        print(f"- {note}")
 
     return 0
 
