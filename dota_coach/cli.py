@@ -42,12 +42,22 @@ def _resolve_many(data: DotaData, names: list[str], label: str) -> list[Hero]:
     return heroes
 
 
+def _minimum_portrait_coverage(data: DotaData) -> int:
+    return max(100, int(len(data.heroes) * 0.75))
+
+
 def _run_health(data: DotaData) -> int:
     print(f"OpenDota heroStats window: last {OPENDOTA_HERO_STATS_WINDOW_DAYS} UTC days")
     print(f"Meta coverage: {data.meta_coverage}/{len(data.heroes)} heroes")
     if data.meta_coverage < max(100, int(len(data.heroes) * 0.75)):
         print("Health error: OpenDota public meta coverage is too low", file=sys.stderr)
         return 4
+
+    portrait_paths = sum(bool(hero.portrait_path) for hero in data.heroes.values())
+    print(f"Portrait-path coverage: {portrait_paths}/{len(data.heroes)} heroes")
+    if portrait_paths < _minimum_portrait_coverage(data):
+        print("Health error: OpenDota heroStats portrait-path coverage is too low", file=sys.stderr)
+        return 9
 
     bracket_coverages = [data.rank_meta_coverage(rank) for rank in RANK_NAMES]
     print(
@@ -109,12 +119,8 @@ def _print_live_header(data: DotaData) -> None:
 
 
 def _prepare_portraits(data: DotaData, directory: str) -> int:
-    try:
-        saved, errors = download_reference_portraits(data.heroes.values(), directory)
-    except PortraitDependencyError as exc:
-        print(f"Portrait error: {exc}", file=sys.stderr)
-        return 9
-
+    saved, errors = download_reference_portraits(data.heroes.values(), directory)
+    required = _minimum_portrait_coverage(data)
     print(f"Portrait references ready: {len(saved)}/{len(data.heroes)} in {directory}")
     if errors:
         print(f"Portrait warnings: {len(errors)} assets could not be prepared", file=sys.stderr)
@@ -122,7 +128,11 @@ def _prepare_portraits(data: DotaData, directory: str) -> int:
             hero = data.heroes_by_id.get(hero_id)
             name = hero.name if hero else str(hero_id)
             print(f"- {name}: {message}", file=sys.stderr)
-    if not saved:
+    if len(saved) < required:
+        print(
+            f"Portrait error: only {len(saved)} references are ready; at least {required} are required for safe recognition",
+            file=sys.stderr,
+        )
         return 9
     return 0
 
@@ -145,8 +155,13 @@ def _recognize_saved_draft(
     try:
         layout = load_layout(layout_path)
         index = PortraitIndex.from_directory(data.heroes.values(), portrait_directory)
-        if index.hero_count == 0:
-            print("Portrait error: reference index is empty; run --prepare-portraits first", file=sys.stderr)
+        required = _minimum_portrait_coverage(data)
+        if index.hero_count < required:
+            print(
+                f"Portrait error: reference index has {index.hero_count}/{len(data.heroes)} heroes; "
+                f"at least {required} are required. Run --prepare-portraits first.",
+                file=sys.stderr,
+            )
             return 9
         recognition = recognize_draft_slots(
             frame_path,
@@ -191,7 +206,7 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--allies", default="", help="Comma-separated allied hero names")
     parser.add_argument("--enemies", default="", help="Comma-separated enemy hero names")
     parser.add_argument("--limit", type=int, default=5, help="Number of recommendations")
-    parser.add_argument("--health", action="store_true", help="Validate live hero, bracket-meta, lane-role and matchup data")
+    parser.add_argument("--health", action="store_true", help="Validate live hero, bracket-meta, portrait, lane-role and matchup data")
 
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument(
@@ -202,12 +217,12 @@ def make_parser() -> argparse.ArgumentParser:
     modes.add_argument(
         "--prepare-portraits",
         metavar="DIR",
-        help="Download/cache canonical hero portrait references into DIR (requires .[vision])",
+        help="Download/cache canonical hero portrait references into DIR",
     )
     modes.add_argument(
         "--recognize-draft",
         metavar="PNG",
-        help="Recognize calibrated draft slots in a saved PNG; requires --layout and --portraits",
+        help="Recognize calibrated draft slots in a saved PNG; requires --layout, --portraits and .[vision]",
     )
     parser.add_argument("--capture-timeout", type=float, default=3.0, help="Seconds to wait for a captured Dota frame")
     parser.add_argument("--layout", metavar="JSON", help="Measured DraftLayout JSON for --recognize-draft")
