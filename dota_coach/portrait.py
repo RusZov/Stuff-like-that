@@ -140,11 +140,11 @@ def portrait_embedding(image: Any) -> Any:
     edge energy. It is deliberately brightness-tolerant and does not slide a
     template over the frame. DraftLayout is responsible for producing the ROI.
     """
-    np, _Image, ImageOps = _vision_deps()
+    np, Image, ImageOps = _vision_deps()
     rgb = _as_rgb_image(image)
     # OpenDota hero portraits are wide. Fit rather than stretch so an ROI with a
     # slightly different aspect ratio does not distort facial/armor structure.
-    rgb = ImageOps.fit(rgb, (96, 54), method=ImageOps.Resampling.LANCZOS, centering=(0.5, 0.5))
+    rgb = ImageOps.fit(rgb, (96, 54), method=Image.Resampling.LANCZOS, centering=(0.5, 0.5))
     array = np.asarray(rgb, dtype=np.float32) / 255.0
 
     # Chroma is much less sensitive to brightness changes than raw RGB.
@@ -237,8 +237,8 @@ class PortraitIndex:
         margin = best_similarity - second_similarity
 
         # Confidence combines absolute likeness and class separation. The exact
-        # thresholds remain conservative until current 7.41e draft screenshots
-        # are collected and measured; low-confidence slots must stay manual.
+        # thresholds remain conservative until current draft screenshots are
+        # collected and measured; low-confidence slots must stay manual.
         likeness = max(0.0, min(1.0, (best_similarity - 0.62) / 0.38))
         separation = max(0.0, min(1.0, margin / 0.10))
         confidence = 0.68 * likeness + 0.32 * separation
