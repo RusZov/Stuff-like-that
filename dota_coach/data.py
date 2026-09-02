@@ -107,13 +107,26 @@ class HttpJsonClient:
         self.attempts = max(1, attempts)
         self._cache: dict[str, Any] = {}
 
+    def invalidate(self, url: str | None = None) -> None:
+        """Invalidate cached responses.
+
+        `get_json()` keeps a per-process cache so one recommendation does not
+        hammer the same endpoint repeatedly. An explicit DotaData.refresh(),
+        however, means the caller wants fresh live data; it must not silently
+        reuse yesterday's heroStats/patch payload in a long-running overlay.
+        """
+        if url is None:
+            self._cache.clear()
+        else:
+            self._cache.pop(url, None)
+
     def get_json(self, url: str) -> Any:
         if url in self._cache:
             return self._cache[url]
         request = Request(
             url,
             headers={
-                "User-Agent": "DotaCoachMVP/0.5 (+https://github.com/RusZov/Stuff-like-that)",
+                "User-Agent": "DotaCoachMVP (+https://github.com/RusZov/Stuff-like-that)",
                 "Accept": "application/json",
             },
         )
@@ -148,6 +161,15 @@ class DotaData:
         self._normalised_names: dict[str, Hero] = {}
 
     def refresh(self) -> None:
+        # In a future live overlay this object can survive for hours. The HTTP
+        # client intentionally caches repeated endpoint reads inside one data
+        # snapshot, but an explicit refresh must start a new snapshot. Keep
+        # compatibility with lightweight/fake clients that do not implement
+        # invalidate().
+        invalidate = getattr(self.client, "invalidate", None)
+        if callable(invalidate):
+            invalidate()
+
         valve_rows: list[dict[str, Any]] = []
         stats_rows: list[dict[str, Any]] = []
         self.source_status = {}
