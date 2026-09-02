@@ -12,7 +12,15 @@ from .data import (
     OPENDOTA_MATCHUP_WINDOW_DAYS,
     RANK_NAMES,
 )
+from .draft_layout import LayoutError, load_layout
+from .draft_recognition import recognize_draft_slots
 from .engine import normalize_position, normalize_rank_tier, validate_draft
+from .portrait import (
+    PortraitDependencyError,
+    PortraitIndex,
+    PortraitIndexError,
+    download_reference_portraits,
+)
 from .service import coach_draft
 
 
@@ -89,6 +97,86 @@ def _run_health(data: DotaData) -> int:
     return 0
 
 
+def _print_live_header(data: DotaData) -> None:
+    print(f"Heroes loaded: {len(data.heroes)}")
+    print(f"Patch: {data.patch or 'unknown'}")
+    print(f"OpenDota heroStats: rolling {OPENDOTA_HERO_STATS_WINDOW_DAYS}-day public/medal sample")
+    print(
+        f"OpenDota matchups: supplemental pro/league sample, roughly {OPENDOTA_MATCHUP_WINDOW_DAYS} days"
+    )
+    for source, status in data.source_status.items():
+        print(f"Source {source}: {status}")
+
+
+def _prepare_portraits(data: DotaData, directory: str) -> int:
+    try:
+        saved, errors = download_reference_portraits(data.heroes.values(), directory)
+    except PortraitDependencyError as exc:
+        print(f"Portrait error: {exc}", file=sys.stderr)
+        return 9
+
+    print(f"Portrait references ready: {len(saved)}/{len(data.heroes)} in {directory}")
+    if errors:
+        print(f"Portrait warnings: {len(errors)} assets could not be prepared", file=sys.stderr)
+        for hero_id, message in list(errors.items())[:8]:
+            hero = data.heroes_by_id.get(hero_id)
+            name = hero.name if hero else str(hero_id)
+            print(f"- {name}: {message}", file=sys.stderr)
+    if not saved:
+        return 9
+    return 0
+
+
+def _recognize_saved_draft(
+    data: DotaData,
+    frame_path: str,
+    layout_path: str | None,
+    portrait_directory: str | None,
+    *,
+    picks_only: bool,
+) -> int:
+    if not layout_path:
+        print("--recognize-draft requires --layout <layout.json>", file=sys.stderr)
+        return 2
+    if not portrait_directory:
+        print("--recognize-draft requires --portraits <directory>", file=sys.stderr)
+        return 2
+
+    try:
+        layout = load_layout(layout_path)
+        index = PortraitIndex.from_directory(data.heroes.values(), portrait_directory)
+        if index.hero_count == 0:
+            print("Portrait error: reference index is empty; run --prepare-portraits first", file=sys.stderr)
+            return 9
+        recognition = recognize_draft_slots(
+            frame_path,
+            layout,
+            index,
+            include_bans=not picks_only,
+        )
+    except (LayoutError, PortraitDependencyError, PortraitIndexError, OSError) as exc:
+        print(f"Recognition error: {exc}", file=sys.stderr)
+        return 9
+
+    print(f"Layout: {recognition.layout_name}")
+    print(f"Portrait references indexed: {index.hero_count}/{len(data.heroes)}")
+    for slot in recognition.slots:
+        if slot.hero_name:
+            status = "accepted" if slot.accepted else "manual"
+            print(
+                f"{slot.slot_id} [{slot.team}/{slot.kind}]: {slot.hero_name} "
+                f"similarity={slot.similarity:.3f} margin={slot.margin:.3f} "
+                f"confidence={slot.confidence:.0%} -> {status}"
+            )
+        else:
+            print(f"{slot.slot_id} [{slot.team}/{slot.kind}]: unresolved -> {slot.reason}")
+
+    accepted = len(recognition.accepted_slots)
+    unresolved = len(recognition.unresolved_slots)
+    print(f"Accepted slots: {accepted}; manual/unresolved: {unresolved}")
+    return 0
+
+
 def make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="dota-coach",
@@ -104,12 +192,27 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--enemies", default="", help="Comma-separated enemy hero names")
     parser.add_argument("--limit", type=int, default=5, help="Number of recommendations")
     parser.add_argument("--health", action="store_true", help="Validate live hero, bracket-meta, lane-role and matchup data")
-    parser.add_argument(
+
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument(
         "--capture-draft",
         metavar="PNG",
         help="Windows: save one exact Dota HWND frame to PNG for draft-layout calibration; no data APIs are called",
     )
+    modes.add_argument(
+        "--prepare-portraits",
+        metavar="DIR",
+        help="Download/cache canonical hero portrait references into DIR (requires .[vision])",
+    )
+    modes.add_argument(
+        "--recognize-draft",
+        metavar="PNG",
+        help="Recognize calibrated draft slots in a saved PNG; requires --layout and --portraits",
+    )
     parser.add_argument("--capture-timeout", type=float, default=3.0, help="Seconds to wait for a captured Dota frame")
+    parser.add_argument("--layout", metavar="JSON", help="Measured DraftLayout JSON for --recognize-draft")
+    parser.add_argument("--portraits", metavar="DIR", help="Prepared portrait reference directory for --recognize-draft")
+    parser.add_argument("--picks-only", action="store_true", help="With --recognize-draft, skip ban slots")
     return parser
 
 
@@ -142,17 +245,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Data error: {exc}", file=sys.stderr)
         return 3
 
-    print(f"Heroes loaded: {len(data.heroes)}")
-    print(f"Patch: {data.patch or 'unknown'}")
-    print(f"OpenDota heroStats: rolling {OPENDOTA_HERO_STATS_WINDOW_DAYS}-day public/medal sample")
-    print(
-        f"OpenDota matchups: supplemental pro/league sample, roughly {OPENDOTA_MATCHUP_WINDOW_DAYS} days"
-    )
-    for source, status in data.source_status.items():
-        print(f"Source {source}: {status}")
+    _print_live_header(data)
 
     if args.health:
         return _run_health(data)
+
+    if args.prepare_portraits:
+        return _prepare_portraits(data, args.prepare_portraits)
+
+    if args.recognize_draft:
+        return _recognize_saved_draft(
+            data,
+            args.recognize_draft,
+            args.layout,
+            args.portraits,
+            picks_only=args.picks_only,
+        )
 
     try:
         allies = _resolve_many(data, _csv(args.allies), "allies")
