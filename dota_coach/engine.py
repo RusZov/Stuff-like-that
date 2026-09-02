@@ -198,7 +198,7 @@ def normalize_rank_tier(rank: str | int | None) -> int | None:
 
 
 def rank_label(rank_tier: int | None) -> str:
-    return RANK_NAMES.get(rank_tier, "All ranked") if rank_tier is not None else "All ranked"
+    return RANK_NAMES[rank_tier] if rank_tier is not None else "All public"
 
 
 def validate_draft(allies: list[Hero], enemies: list[Hero]) -> None:
@@ -327,7 +327,7 @@ def _meta_points(hero: Hero, rank_tier: int | None) -> tuple[float, float, list[
     raw = (win_rate - 0.50) * 120.0
     points = max(-6.0, min(6.0, raw)) * sample_confidence
     reasons: list[str] = []
-    bracket = RANK_NAMES.get(rank_tier, "ranked") if rank_tier is not None else "ranked"
+    bracket = RANK_NAMES[rank_tier] if rank_tier is not None else "public"
     if points >= 1.8:
         reasons.append(f"{bracket} WR {win_rate:.1%} на {picks:,} играх")
     elif points <= -2.2:
@@ -412,7 +412,7 @@ def _matchup_points(data: DotaData, hero: Hero, enemies: list[Hero]) -> tuple[fl
     if not enemies:
         return 0.0, 0.0, []
 
-    total = 0.0
+    weighted_total = 0.0
     evidence = 0.0
     rows: list[tuple[float, int, str]] = []
     for enemy in enemies:
@@ -420,22 +420,28 @@ def _matchup_points(data: DotaData, hero: Hero, enemies: list[Hero]) -> tuple[fl
         if matchup is None:
             continue
         win_rate, games = matchup
-        # OpenDota's hero matchup endpoint is supplemental aggregate evidence,
+        # OpenDota's hero matchup endpoint is supplemental pro/league evidence,
         # not a current-role/current-bracket public truth. Keep it weaker than fit.
         reliability = min(1.0, sqrt(max(games, 0) / 1800.0))
-        delta = max(-4.5, min(4.5, (win_rate - 0.50) * 45.0)) * reliability
-        total += delta
+        raw_delta = max(-4.5, min(4.5, (win_rate - 0.50) * 45.0))
+        weighted_total += raw_delta * reliability
         evidence += reliability
         rows.append((win_rate, games, enemy.name))
 
-    total = max(-10.0, min(10.0, total))
+    # Do not reward a candidate simply because more enemy slots are visible.
+    # The matchup score is the average quality of the evidence we actually have;
+    # additional visible enemies improve coverage/confidence instead of adding
+    # the same general pro-strength signal several times.
+    total = weighted_total / len(rows) if rows else 0.0
+    total = max(-4.5, min(4.5, total))
+
     reasons: list[str] = []
     if rows:
         best = max(rows, key=lambda row: row[0])
         worst = min(rows, key=lambda row: row[0])
-        if best[0] >= 0.53:
+        if best[0] >= 0.53 and best[1] >= 100:
             reasons.append(f"aggregate-матчап хорош против {best[2]} ({best[0]:.1%}, {best[1]} игр)")
-        if worst[0] <= 0.47:
+        if worst[0] <= 0.47 and worst[1] >= 100:
             reasons.append(f"aggregate-матчап рискованный против {worst[2]} ({worst[0]:.1%}, {worst[1]} игр)")
     return total, min(1.0, evidence / max(1, len(enemies))), reasons
 
@@ -549,8 +555,11 @@ def build_strategy(allies: list[Hero], enemies: list[Hero], position: str | None
 
     if enemy_counts.get("Carry", 0) >= 2:
         lines.append("У соперника жадный драфт с несколькими carry-функциями: не отдавайте ему бесплатное время, давите линии и объекты до поздних слотов.")
-    if "Disabler" in enemy_roles:
-        lines.append("У врага много контроля: core-героям заранее планировать BKB/диспел и не показываться первыми.")
+    enemy_control = enemy_counts.get("Disabler", 0)
+    if enemy_control >= 2:
+        lines.append("У врага много источников контроля: core-героям заранее планировать BKB/диспел и не показываться первыми.")
+    elif enemy_control == 1:
+        lines.append("У врага есть надёжный контроль: учитывайте его перед агрессивным заходом и заранее планируйте BKB/диспел при необходимости.")
     if "Escape" in enemy_roles:
         lines.append("Против мобильных целей сохраняйте мгновенный контроль; не тратьте все disable в первый фронтлейн.")
     if "Pusher" in enemy_roles:
