@@ -147,6 +147,13 @@ def portrait_embedding(image: Any) -> Any:
     rgb = ImageOps.fit(rgb, (96, 54), method=Image.Resampling.LANCZOS, centering=(0.5, 0.5))
     array = np.asarray(rgb, dtype=np.float32) / 255.0
 
+    # Empty/unfilled draft slots are often close to a flat panel. Without this
+    # guard every crop would still have a mathematically nearest hero, which is
+    # exactly the false-positive behavior this pipeline is designed to avoid.
+    spatial_std = np.std(array.reshape(-1, 3), axis=0)
+    if float(np.max(spatial_std)) < 0.015:
+        raise PortraitIndexError("Portrait crop is visually blank or unfilled")
+
     # Chroma is much less sensitive to brightness changes than raw RGB.
     channel_sum = array.sum(axis=2, keepdims=True)
     chroma = array / np.maximum(channel_sum, 1e-4)
