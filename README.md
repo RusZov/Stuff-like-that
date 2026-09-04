@@ -2,7 +2,7 @@
 
 Clean restart of the project after removing the unreliable full-screen `cv2.matchTemplate` prototype.
 
-Current package version: **0.7.0**.
+Current package version: **0.8.1**.
 
 ## What works now
 
@@ -28,8 +28,9 @@ Current package version: **0.7.0**.
 - `PortraitIndex` builds a compact image embedding from an already-cropped portrait ROI using chroma, normalized luminance structure and edge energy. It does **not** slide a template over the frame.
 - Recognition checks absolute likeness **and** the margin to the second-best hero, so ambiguous crops fail closed.
 - Visually flat/unfilled slots are rejected before classification instead of being assigned the mathematically nearest hero.
-- If two slots claim the same hero, only the strongest claim can remain accepted; weaker duplicates become manual/unresolved because duplicate heroes are impossible in a legal draft.
+- If two slots claim the same hero, only the strongest claim can remain accepted; weaker duplicates become manual/unresolved both during classification and in the final recognized-draft bridge.
 - `recognize_draft_slots()` connects `DraftLayout -> exact slot crop -> PortraitIndex -> slot/hero/confidence`.
+- `coach_recognized_draft()` now sanitizes duplicate hero claims before calling the legal-draft validator, so an otherwise usable frame does not crash the MVP.
 - Low-confidence slots remain unresolved for manual fallback.
 - Synthetic regression tests cover aspect mismatch, blank slots, duplicate claims, brightness changes and class-margin ambiguity.
 
@@ -77,138 +78,3 @@ The health command checks roster/meta coverage, medal buckets, portrait paths, a
 ## Exact Dota frame capture
 
 Windows only:
-
-```bash
-dota-coach --capture-draft captures/draft_169.png
-```
-
-`--capture-draft` resolves a visible Dota window and targets its HWND directly. It deliberately bypasses Valve/OpenDota loading so calibration frames can still be captured during a data-source outage.
-
-## Portrait reference preparation
-
-Once the vision package is installed, prepare the canonical reference set:
-
-```bash
-dota-coach --prepare-portraits assets/hero_portraits
-```
-
-References are stored as `<hero_id>.png`, so localization/name changes do not break the cache. Individual download failures are reported. Recognition refuses to run with a dangerously small partial index; at least 75% of the current roster and never fewer than 100 hero references must be present.
-
-## Recognize a saved draft frame
-
-After a real measured layout exists:
-
-```bash
-dota-coach \
-  --recognize-draft captures/draft_169.png \
-  --layout layouts/draft_169.json \
-  --portraits assets/hero_portraits
-```
-
-Use `--picks-only` to skip ban slots.
-
-Output is per slot and includes hero, similarity, second-best margin, confidence and either `accepted` or `manual`. A flat empty slot has no hero ID. A weaker duplicate hero claim is forced back to manual review.
-
-Important: this command is intentionally **not** usable with guessed coordinates. A current measured `DraftLayout` is required.
-
-## High-level API
-
-Use `coach_draft()` for recommendation code:
-
-```python
-from dota_coach.data import DotaData
-from dota_coach.service import coach_draft
-
-data = DotaData()
-data.refresh()
-allies = [data.resolve("Crystal Maiden")]
-enemies = [data.resolve("Axe")]
-result = coach_draft(data, allies, enemies, "mid", limit=5, rank_tier="legend")
-
-for pick in result.picks:
-    print(pick.hero, pick.score, pick.confidence)
-```
-
-For calibrated screen recognition:
-
-```python
-from dota_coach import PortraitIndex, recognize_draft_slots
-from dota_coach.draft_layout import load_layout
-
-layout = load_layout("layouts/draft_169.json")
-index = PortraitIndex.from_directory(data.heroes.values(), "assets/hero_portraits")
-recognized = recognize_draft_slots("captures/draft_169.png", layout, index)
-
-for slot in recognized.accepted_slots:
-    print(slot.slot_id, slot.hero_name, slot.confidence)
-```
-
-The application integration rule is simple: **only accepted high-confidence pick slots may be fed automatically into `coach_draft()`; unresolved slots stay manual.**
-
-## Data-source semantics
-
-- Valve heroes: `https://www.dota2.com/datafeed/herolist?language=english`
-- Valve patch list: `https://www.dota2.com/datafeed/patchnoteslist`
-- OpenDota hero stats: `https://api.opendota.com/api/heroStats`
-- OpenDota lane roles: `https://api.opendota.com/api/scenarios/laneRoles?lane_role={lane_role}`
-- OpenDota matchups: `https://api.opendota.com/api/heroes/{hero_id}/matchups`
-
-OpenDota `heroStats` exposes explicit `pub_pick/pub_win` plus medal fields `1_*..8_*` from a short rolling window. Dota Coach keeps those populations separate. Summing medal buckets is only a compatibility fallback for old/cached payloads without `pub_*`.
-
-`scenarios/laneRoles` is lane assignment, not exact farm priority. It is supporting evidence rather than a direct declaration of position 1/5 or 3/4. Requests are split by lane because the current upstream query is limited to 1200 rows.
-
-The OpenDota hero matchup route currently joins `leagues`, so its rows are pro/league evidence rather than bracket-specific public matchup statistics. `wins` belongs to the hero whose endpoint was requested. Dota Coach requests each visible enemy once and inverts that enemy win rate to estimate candidate-vs-enemy evidence.
-
-## Architecture
-
-```text
-manual draft input                              exact Dota HWND frame
-      |                                                |
-      |                                          DraftLayout
-      |                                                |
-      |                                    exact portrait slot crops
-      |                                                |
-      |                                         PortraitIndex
-      |                                                |
-      |                                hero + confidence / unresolved
-      |                                                |
-      +---------------- accepted real pick slots ------+
-      |
-      v
-Valve roster + OpenDota 7d public/medal meta + lane-role + optional pro/league matchup
-      |
-      v
-coach_draft()
-      |
-      +--> position/role fit
-      +--> observed lane share
-      +--> team gaps/redundancy
-      +--> selected-bracket meta + sample confidence
-      +--> capped enemy composition / matchup evidence
-      +--> confidence calibration
-      |
-      v
-ranked picks + warnings + tactics + source provenance
-```
-
-## Tests
-
-```bash
-python -m unittest discover -s tests -v
-```
-
-GitHub Actions installs the vision extras and runs unit/compile checks on Linux and Windows. Windows additionally validates the exact-HWND capture dependency. Linux validates live Valve/OpenDota coverage and smoke-tests the high-level `coach_draft()` service against live data.
-
-## Next concrete step
-
-The generic recognition pipeline is implemented. The remaining blocker is **real current Dota draft geometry and calibration**, not `cv2` or screen capture.
-
-1. Capture one current draft frame at **16:9** and one at **16:10** using `dota-coach --capture-draft`.
-2. Measure stable draft UI anchors plus the real pick/ban portrait rectangles into two `DraftLayout` JSON fixtures.
-3. Add an anchor validator that chooses a layout by aspect ratio + measured anchor evidence and rejects non-draft screens.
-4. Run the existing `recognize_draft_slots()` pipeline on those real frames and calibrate `min_similarity`, `min_margin` and `min_confidence` from real positive, empty and transitional slots.
-5. Add saved-frame regression fixtures for 16:9 and 16:10.
-6. Map only accepted Radiant/Dire **pick** slots into `coach_draft()`; keep unresolved slots manual.
-7. Only after this is stable, build the live overlay loop.
-
-Do not add OCR or moving-world hero detection to solve draft ingestion. The MVP scope stays on the stable draft HUD.
