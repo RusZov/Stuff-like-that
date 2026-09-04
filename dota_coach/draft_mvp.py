@@ -38,19 +38,19 @@ def recognition_to_draft_input(
     recognition: DraftRecognition,
     perspective: str,
 ) -> RecognizedDraftInput:
-    """Convert only accepted team pick slots into a legal coach input.
+    """Convert accepted pick slots into a legal coach input.
 
-    Bans are never sent to coach_draft(). Unknown-team picks, unresolved slots,
-    missing hero ids and stale ids stay in manual fallback instead of being
-    guessed. The perspective is the user's side (radiant or dire).
+    The recognizer can occasionally assign the same hero to two slots when
+    portrait crops are visually ambiguous. We keep only the strongest accepted
+    occurrence and move the weaker duplicate to manual fallback instead of
+    letting coach_draft() fail on an otherwise usable frame.
     """
     perspective = perspective.strip().lower()
     if perspective not in {"radiant", "dire"}:
         raise ValueError("perspective must be radiant or dire")
     opponent = "dire" if perspective == "radiant" else "radiant"
 
-    allies: list[Hero] = []
-    enemies: list[Hero] = []
+    accepted: list[tuple[SlotRecognition, Hero]] = []
     manual: list[SlotRecognition] = []
     bans: list[SlotRecognition] = []
 
@@ -71,6 +71,31 @@ def recognition_to_draft_input(
         if hero is None:
             manual.append(slot)
             continue
+        accepted.append((slot, hero))
+
+    # De-duplicate by hero id, preserving the most confident accepted slot.
+    # Ties are resolved deterministically by slot id so output is reproducible.
+    best_by_hero: dict[int, tuple[SlotRecognition, Hero]] = {}
+    for slot, hero in accepted:
+        previous = best_by_hero.get(hero.id)
+        if previous is None or (
+            slot.confidence,
+            slot.similarity,
+            slot.slot_id,
+        ) > (
+            previous[0].confidence,
+            previous[0].similarity,
+            previous[0].slot_id,
+        ):
+            if previous is not None:
+                manual.append(previous[0])
+            best_by_hero[hero.id] = (slot, hero)
+        else:
+            manual.append(slot)
+
+    allies: list[Hero] = []
+    enemies: list[Hero] = []
+    for slot, hero in sorted(best_by_hero.values(), key=lambda item: item[0].slot_id):
         if slot.team == perspective:
             allies.append(hero)
         else:
