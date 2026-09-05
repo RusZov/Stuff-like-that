@@ -31,7 +31,11 @@ def _slot(
     hero_id: int | None = None,
     hero_name: str | None = None,
     accepted: bool = True,
+    confidence: float | None = None,
+    similarity: float | None = None,
+    margin: float | None = None,
 ) -> SlotRecognition:
+    has_hero = hero_id is not None
     return SlotRecognition(
         slot_id=slot_id,
         kind=kind,
@@ -39,9 +43,9 @@ def _slot(
         rect=PixelRect(0, 0, 10, 10),
         hero_id=hero_id,
         hero_name=hero_name,
-        similarity=0.9 if hero_id else 0.0,
-        margin=0.08 if hero_id else 0.0,
-        confidence=0.85 if hero_id else 0.0,
+        similarity=(0.9 if has_hero else 0.0) if similarity is None else similarity,
+        margin=(0.08 if has_hero else 0.0) if margin is None else margin,
+        confidence=(0.85 if has_hero else 0.0) if confidence is None else confidence,
         accepted=accepted,
         reason="accepted" if accepted else "manual",
     )
@@ -99,6 +103,44 @@ class DraftMvpTests(unittest.TestCase):
         )
         result = recognition_to_draft_input(data, recognition, "radiant")
         self.assertEqual(result.allies, ())
+        self.assertEqual([slot.slot_id for slot in result.manual_slots], ["r1"])
+
+    def test_duplicate_hero_keeps_strongest_slot(self) -> None:
+        axe = _hero(2, "Axe")
+        data = _FakeData([axe])
+        recognition = DraftRecognition(
+            layout_name="test",
+            slots=(
+                _slot("r1", team="radiant", hero_id=axe.id, hero_name=axe.name, confidence=0.70),
+                _slot("d1", team="dire", hero_id=axe.id, hero_name=axe.name, confidence=0.94),
+            ),
+        )
+
+        result = recognition_to_draft_input(data, recognition, "radiant")
+        self.assertEqual(result.allies, ())
+        self.assertEqual([hero.name for hero in result.enemies], ["Axe"])
+        self.assertEqual([slot.slot_id for slot in result.manual_slots], ["r1"])
+
+    def test_overfull_team_keeps_five_strongest_and_moves_rest_manual(self) -> None:
+        heroes = [_hero(index, f"Hero {index}") for index in range(1, 7)]
+        data = _FakeData(heroes)
+        recognition = DraftRecognition(
+            layout_name="stale-layout",
+            slots=tuple(
+                _slot(
+                    f"r{index}",
+                    team="radiant",
+                    hero_id=hero.id,
+                    hero_name=hero.name,
+                    confidence=0.60 + index * 0.05,
+                )
+                for index, hero in enumerate(heroes, start=1)
+            ),
+        )
+
+        result = recognition_to_draft_input(data, recognition, "radiant")
+        self.assertEqual(len(result.allies), 5)
+        self.assertNotIn("Hero 1", [hero.name for hero in result.allies])
         self.assertEqual([slot.slot_id for slot in result.manual_slots], ["r1"])
 
     def test_coach_bridge_appends_manual_fallback_warning(self) -> None:
