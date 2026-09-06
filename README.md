@@ -2,7 +2,7 @@
 
 Clean restart of the project after removing the unreliable full-screen `cv2.matchTemplate` prototype.
 
-Current package version: **0.8.1**.
+Current package version: **0.8.2**.
 
 ## What works now
 
@@ -18,6 +18,7 @@ Current package version: **0.8.1**.
 - Produces position-aware tactics and calls out missing control/initiation, greedy multi-core drafts, push pressure and other broad composition risks.
 - Retries transient optional-source failures and exposes source warnings/provenance.
 - `coach_draft()` calibrates the complete candidate pool by confidence before top-N truncation.
+- `coach_draft(..., excluded_hero_ids=...)` removes confidently banned heroes before the final top-N is selected, so a ban can never be recommended merely because it had a high score.
 
 ### Draft-screen ingestion foundation
 
@@ -30,7 +31,8 @@ Current package version: **0.8.1**.
 - Visually flat/unfilled slots are rejected before classification instead of being assigned the mathematically nearest hero.
 - If two slots claim the same hero, only the strongest claim can remain accepted; weaker duplicates become manual/unresolved both during classification and in the final recognized-draft bridge.
 - `recognize_draft_slots()` connects `DraftLayout -> exact slot crop -> PortraitIndex -> slot/hero/confidence`.
-- `coach_recognized_draft()` now sanitizes duplicate hero claims before calling the legal-draft validator, so an otherwise usable frame does not crash the MVP.
+- `coach_recognized_draft()` sanitizes duplicate/overfull pick claims before calling the legal-draft validator.
+- Confident valid ban slots are passed to the recommendation layer as exclusions; unresolved or stale bans stay manual and do not suppress candidates.
 - Low-confidence slots remain unresolved for manual fallback.
 - Synthetic regression tests cover aspect mismatch, blank slots, duplicate claims, brightness changes and class-margin ambiguity.
 
