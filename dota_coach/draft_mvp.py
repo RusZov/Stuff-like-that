@@ -43,11 +43,13 @@ def recognition_to_draft_input(
     recognition: DraftRecognition,
     perspective: str,
 ) -> RecognizedDraftInput:
-    """Convert accepted pick slots into a legal coach input.
+    """Convert accepted draft slots into a legal coach input.
 
     Recognition is intentionally fail-safe here. Ambiguous duplicate heroes and
     impossible overfull teams are reduced to the strongest legal set; weaker
     slots stay visible as manual fallback instead of crashing coach_draft().
+    Confident, valid ban slots are retained so the recommendation layer can
+    exclude heroes that are no longer pickable.
     """
     perspective = perspective.strip().lower()
     if perspective not in {"radiant", "dire"}:
@@ -60,7 +62,10 @@ def recognition_to_draft_input(
 
     for slot in recognition.slots:
         if slot.kind == "ban":
-            bans.append(slot)
+            if slot.accepted and slot.hero_id is not None and _hero_by_id(data, slot.hero_id) is not None:
+                bans.append(slot)
+            else:
+                manual.append(slot)
             continue
         if slot.kind != "pick":
             manual.append(slot)
@@ -126,8 +131,11 @@ def coach_recognized_draft(
     limit: int = 5,
     rank_tier: str | int | None = None,
 ) -> RecognizedCoachResult:
-    """End-to-end saved-frame MVP bridge: accepted picks -> coach_draft()."""
+    """End-to-end saved-frame MVP bridge: accepted picks/bans -> coach_draft()."""
     recognized = recognition_to_draft_input(data, recognition, perspective)
+    banned_hero_ids = tuple(
+        slot.hero_id for slot in recognized.ignored_bans if slot.accepted and slot.hero_id is not None
+    )
     result = coach_draft(
         data,
         list(recognized.allies),
@@ -135,12 +143,13 @@ def coach_recognized_draft(
         position,
         limit=limit,
         rank_tier=rank_tier,
+        excluded_hero_ids=banned_hero_ids,
     )
 
     extra_warnings: list[str] = list(result.warnings)
     if recognized.manual_slots:
         extra_warnings.append(
-            f"{len(recognized.manual_slots)} draft pick slot(s) remain manual/unresolved and were not used for scoring"
+            f"{len(recognized.manual_slots)} draft slot(s) remain manual/unresolved and were not used for scoring"
         )
     if not recognized.allies and not recognized.enemies:
         extra_warnings.append("no accepted pick slots were available; recommendation uses meta/role evidence only")
