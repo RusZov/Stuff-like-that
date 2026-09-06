@@ -21,6 +21,7 @@ def hero(hero_id, name, roles, wr=0.50, games=10000):
 class ServiceData:
     def __init__(self, heroes, matchups=None, lane_samples=None):
         self.heroes = {value.name: value for value in heroes}
+        self.heroes_by_id = {value.id: value for value in heroes}
         self.source_status = {}
         self._matchups = matchups or {}
         self._lane_samples = lane_samples or {}
@@ -91,6 +92,17 @@ class DraftCoachServiceTests(unittest.TestCase):
             result = coach_draft(data, [], [], "mid", limit=1)
         self.assertEqual(mocked.call_args.kwargs["limit"], 3)
         self.assertEqual(result.picks[0].hero, "High Confidence Better Pick")
+
+    def test_excluded_banned_hero_is_removed_before_top_n(self):
+        data = ServiceData(self.heroes)
+        raw = [
+            Pick("Puck", 90.0, 1.0, ("raw",)),
+            Pick("Shadow Fiend", 80.0, 1.0, ("raw",)),
+            Pick("Queen of Pain", 70.0, 1.0, ("raw",)),
+        ]
+        with patch("dota_coach.service.recommend", return_value=raw):
+            result = coach_draft(data, [], [], "mid", limit=2, excluded_hero_ids=[self.puck.id])
+        self.assertEqual([pick.hero for pick in result.picks], ["Shadow Fiend", "Queen of Pain"])
 
     def test_tactics_add_mobile_enemy_control_warning(self):
         mobile2 = hero(30, "Mobile Two", ["Escape", "Carry"], 0.50)
