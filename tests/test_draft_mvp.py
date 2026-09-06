@@ -79,6 +79,17 @@ class DraftMvpTests(unittest.TestCase):
         self.assertEqual({slot.slot_id for slot in result.manual_slots}, {"r2", "u1"})
         self.assertEqual([slot.slot_id for slot in result.ignored_bans], ["b1"])
 
+    def test_unresolved_ban_stays_manual_instead_of_excluding_a_hero(self) -> None:
+        axe = _hero(2, "Axe")
+        data = _FakeData([axe])
+        recognition = DraftRecognition(
+            layout_name="test",
+            slots=(_slot("b1", team="radiant", kind="ban", hero_id=axe.id, hero_name=axe.name, accepted=False),),
+        )
+        result = recognition_to_draft_input(data, recognition, "radiant")
+        self.assertEqual(result.ignored_bans, ())
+        self.assertEqual([slot.slot_id for slot in result.manual_slots], ["b1"])
+
     def test_perspective_inverts_allies_and_enemies(self) -> None:
         axe = _hero(2, "Axe")
         cm = _hero(5, "Crystal Maiden")
@@ -143,14 +154,16 @@ class DraftMvpTests(unittest.TestCase):
         self.assertNotIn("Hero 1", [hero.name for hero in result.allies])
         self.assertEqual([slot.slot_id for slot in result.manual_slots], ["r1"])
 
-    def test_coach_bridge_appends_manual_fallback_warning(self) -> None:
+    def test_coach_bridge_appends_manual_fallback_warning_and_passes_bans(self) -> None:
         axe = _hero(2, "Axe")
-        data = _FakeData([axe])
+        cm = _hero(5, "Crystal Maiden")
+        data = _FakeData([axe, cm])
         recognition = DraftRecognition(
             layout_name="test",
             slots=(
                 _slot("r1", team="radiant", hero_id=axe.id, hero_name=axe.name),
                 _slot("d1", team="dire", hero_id=None, hero_name=None, accepted=False),
+                _slot("b1", team="radiant", kind="ban", hero_id=cm.id, hero_name=cm.name),
             ),
         )
         base = DraftResult(
@@ -168,6 +181,7 @@ class DraftMvpTests(unittest.TestCase):
         self.assertEqual([hero.name for hero in args[1]], ["Axe"])
         self.assertEqual(args[2], [])
         self.assertEqual(kwargs["limit"], 3)
+        self.assertEqual(kwargs["excluded_hero_ids"], (cm.id,))
         self.assertIn("manual/unresolved", result.coach.warnings[0])
 
     def test_invalid_perspective_fails_closed(self) -> None:
