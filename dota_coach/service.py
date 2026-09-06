@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+from typing import Iterable
 
 from .data import DotaData, Hero, OPENDOTA_MATCHUP_WINDOW_DAYS
 from .engine import Pick, build_strategy, normalize_position, normalize_rank_tier, recommend, validate_draft
@@ -62,6 +63,20 @@ def _tactical_additions(allies: list[Hero], enemies: list[Hero], position: str) 
     return lines
 
 
+def _hero_names_for_ids(data: DotaData, hero_ids: Iterable[int] | None) -> set[str]:
+    if not hero_ids:
+        return set()
+    wanted = {int(hero_id) for hero_id in hero_ids}
+    names: set[str] = set()
+    mapping = getattr(data, "heroes_by_id", None)
+    if isinstance(mapping, dict):
+        names.update(hero.name for hero_id, hero in mapping.items() if hero_id in wanted)
+    for hero in getattr(data, "heroes", {}).values():
+        if hero.id in wanted:
+            names.add(hero.name)
+    return names
+
+
 def coach_draft(
     data: DotaData,
     allies: list[Hero],
@@ -69,16 +84,20 @@ def coach_draft(
     position: str,
     limit: int = 5,
     rank_tier: str | int | None = None,
+    excluded_hero_ids: Iterable[int] | None = None,
 ) -> DraftResult:
-    """High-level MVP entry point used by CLI and future draft-screen ingestion.
+    """High-level MVP entry point used by CLI and draft-screen ingestion.
 
     It centralizes optional data loading so callers cannot accidentally get a
     matchup-free ranking merely because they forgot to preload OpenDota rows.
+    ``excluded_hero_ids`` is used by draft ingestion for confidently recognized
+    bans; those heroes must never be returned as recommendations.
     """
     position = normalize_position(position)
     rank_tier = normalize_rank_tier(rank_tier)
     validate_draft(allies, enemies)
     limit = max(1, int(limit))
+    excluded_names = _hero_names_for_ids(data, excluded_hero_ids)
 
     warnings: list[str] = []
 
@@ -105,6 +124,8 @@ def coach_draft(
     hero_count = len(getattr(data, "heroes", {}))
     pool_limit = max(limit, hero_count)
     raw = recommend(data, allies, enemies, position, limit=pool_limit, rank_tier=rank_tier)
+    if excluded_names:
+        raw = [pick for pick in raw if pick.hero not in excluded_names]
     picks = sorted((_calibrate_pick(pick) for pick in raw), key=lambda p: (-p.score, -p.confidence, p.hero))[:limit]
 
     relabeled: list[Pick] = []
