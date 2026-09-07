@@ -61,14 +61,15 @@ class DraftMvpTests(unittest.TestCase):
     def test_only_accepted_pick_slots_feed_the_coach(self) -> None:
         axe = _hero(2, "Axe")
         cm = _hero(5, "Crystal Maiden")
-        data = _FakeData([axe, cm])
+        lion = _hero(26, "Lion")
+        data = _FakeData([axe, cm, lion])
         recognition = DraftRecognition(
             layout_name="test",
             slots=(
                 _slot("r1", team="radiant", hero_id=axe.id, hero_name=axe.name),
                 _slot("d1", team="dire", hero_id=cm.id, hero_name=cm.name),
                 _slot("r2", team="radiant", hero_id=None, hero_name=None, accepted=False),
-                _slot("b1", team="radiant", kind="ban", hero_id=cm.id, hero_name=cm.name),
+                _slot("b1", team="radiant", kind="ban", hero_id=lion.id, hero_name=lion.name),
                 _slot("u1", team="unknown", hero_id=axe.id, hero_name=axe.name),
             ),
         )
@@ -88,6 +89,53 @@ class DraftMvpTests(unittest.TestCase):
         )
         result = recognition_to_draft_input(data, recognition, "radiant")
         self.assertEqual(result.ignored_bans, ())
+        self.assertEqual([slot.slot_id for slot in result.manual_slots], ["b1"])
+
+    def test_pick_ban_conflict_keeps_stronger_pick_and_moves_ban_manual(self) -> None:
+        axe = _hero(2, "Axe")
+        data = _FakeData([axe])
+        recognition = DraftRecognition(
+            layout_name="transition",
+            slots=(
+                _slot("r1", team="radiant", hero_id=axe.id, hero_name=axe.name, confidence=0.95),
+                _slot("b1", team="radiant", kind="ban", hero_id=axe.id, hero_name=axe.name, confidence=0.72),
+            ),
+        )
+
+        result = recognition_to_draft_input(data, recognition, "radiant")
+        self.assertEqual([hero.name for hero in result.allies], ["Axe"])
+        self.assertEqual(result.ignored_bans, ())
+        self.assertEqual([slot.slot_id for slot in result.manual_slots], ["b1"])
+
+    def test_pick_ban_conflict_keeps_stronger_ban_and_moves_pick_manual(self) -> None:
+        axe = _hero(2, "Axe")
+        data = _FakeData([axe])
+        recognition = DraftRecognition(
+            layout_name="transition",
+            slots=(
+                _slot("r1", team="radiant", hero_id=axe.id, hero_name=axe.name, confidence=0.70),
+                _slot("b1", team="radiant", kind="ban", hero_id=axe.id, hero_name=axe.name, confidence=0.96),
+            ),
+        )
+
+        result = recognition_to_draft_input(data, recognition, "radiant")
+        self.assertEqual(result.allies, ())
+        self.assertEqual([slot.slot_id for slot in result.ignored_bans], ["b1"])
+        self.assertEqual([slot.slot_id for slot in result.manual_slots], ["r1"])
+
+    def test_duplicate_bans_keep_only_strongest_claim(self) -> None:
+        axe = _hero(2, "Axe")
+        data = _FakeData([axe])
+        recognition = DraftRecognition(
+            layout_name="stale-layout",
+            slots=(
+                _slot("b1", team="radiant", kind="ban", hero_id=axe.id, hero_name=axe.name, confidence=0.70),
+                _slot("b2", team="dire", kind="ban", hero_id=axe.id, hero_name=axe.name, confidence=0.91),
+            ),
+        )
+
+        result = recognition_to_draft_input(data, recognition, "radiant")
+        self.assertEqual([slot.slot_id for slot in result.ignored_bans], ["b2"])
         self.assertEqual([slot.slot_id for slot in result.manual_slots], ["b1"])
 
     def test_perspective_inverts_allies_and_enemies(self) -> None:
