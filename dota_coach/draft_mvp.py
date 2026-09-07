@@ -45,11 +45,11 @@ def recognition_to_draft_input(
 ) -> RecognizedDraftInput:
     """Convert accepted draft slots into a legal coach input.
 
-    Recognition is intentionally fail-safe here. Ambiguous duplicate heroes and
-    impossible overfull teams are reduced to the strongest legal set; weaker
-    slots stay visible as manual fallback instead of crashing coach_draft().
-    Confident, valid ban slots are retained so the recommendation layer can
-    exclude heroes that are no longer pickable.
+    Recognition is intentionally fail-safe here. Ambiguous duplicate heroes,
+    contradictory pick-vs-ban claims and impossible overfull teams are reduced
+    to the strongest legal set; weaker slots stay visible as manual fallback
+    instead of crashing or silently influencing coach_draft(). Confident, valid
+    ban slots are retained only when they do not contradict a stronger pick.
     """
     perspective = perspective.strip().lower()
     if perspective not in {"radiant", "dire"}:
@@ -82,9 +82,8 @@ def recognition_to_draft_input(
             continue
         accepted.append((slot, hero))
 
-    # De-duplicate by hero id, preserving the strongest accepted slot. This is
-    # required across both teams because a hero cannot legally appear twice in
-    # one Dota draft. Ties are deterministic by slot id.
+    # De-duplicate accepted pick claims by hero id across both teams. A hero can
+    # legally appear only once, so weaker claims become manual fallback.
     best_by_hero: dict[int, tuple[SlotRecognition, Hero]] = {}
     for slot, hero in accepted:
         previous = best_by_hero.get(hero.id)
@@ -94,6 +93,31 @@ def recognition_to_draft_input(
             best_by_hero[hero.id] = (slot, hero)
         else:
             manual.append(slot)
+
+    # A legal draft cannot contain the same hero as both picked and banned.
+    # Resolve that contradiction with the strongest visual claim and fail the
+    # weaker side to manual. This is especially important on transition frames
+    # where a stale portrait can remain visible inside one ROI for a few frames.
+    best_ban_by_hero: dict[int, SlotRecognition] = {}
+    for ban in bans:
+        assert ban.hero_id is not None
+        previous = best_ban_by_hero.get(ban.hero_id)
+        if previous is None or _recognition_strength(ban) > _recognition_strength(previous):
+            if previous is not None:
+                manual.append(previous)
+            best_ban_by_hero[ban.hero_id] = ban
+        else:
+            manual.append(ban)
+
+    for hero_id in set(best_by_hero) & set(best_ban_by_hero):
+        pick_slot, _hero = best_by_hero[hero_id]
+        ban_slot = best_ban_by_hero[hero_id]
+        if _recognition_strength(pick_slot) >= _recognition_strength(ban_slot):
+            manual.append(ban_slot)
+            del best_ban_by_hero[hero_id]
+        else:
+            manual.append(pick_slot)
+            del best_by_hero[hero_id]
 
     # A legal Dota team has at most five picks. A stale/incorrect layout can
     # expose extra accepted ROIs, so cap each side to its five strongest slots
@@ -113,6 +137,7 @@ def recognition_to_draft_input(
         else:
             enemies.append(hero)
 
+    bans = list(best_ban_by_hero.values())
     manual.sort(key=lambda slot: slot.slot_id)
     bans.sort(key=lambda slot: slot.slot_id)
     return RecognizedDraftInput(
