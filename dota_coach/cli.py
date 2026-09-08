@@ -13,6 +13,7 @@ from .data import (
     RANK_NAMES,
 )
 from .draft_layout import LayoutError, load_layout
+from .draft_mvp import coach_recognized_draft
 from .draft_recognition import recognize_draft_slots
 from .engine import normalize_position, normalize_rank_tier, validate_draft
 from .portrait import (
@@ -21,7 +22,7 @@ from .portrait import (
     PortraitIndexError,
     download_reference_portraits,
 )
-from .service import coach_draft
+from .service import DraftResult, coach_draft
 
 
 def _csv(value: str) -> list[str]:
@@ -118,6 +119,27 @@ def _print_live_header(data: DotaData) -> None:
         print(f"Source {source}: {status}")
 
 
+def _print_coach_result(result: DraftResult) -> None:
+    print("\nRecommendations")
+    for index, pick in enumerate(result.picks, start=1):
+        print(f"{index}. {pick.hero}: score={pick.score:.2f}, confidence={pick.confidence:.0%}")
+        for reason in pick.reasons:
+            print(f"   - {reason}")
+
+    if result.warnings:
+        print("\nData warnings")
+        for warning in result.warnings:
+            print(f"- {warning}")
+
+    print("\nTactics")
+    for line in result.tactics:
+        print(f"- {line}")
+
+    print("\nData provenance")
+    for note in result.source_notes:
+        print(f"- {note}")
+
+
 def _prepare_portraits(data: DotaData, directory: str) -> int:
     saved, errors = download_reference_portraits(data.heroes.values(), directory)
     required = _minimum_portrait_coverage(data)
@@ -144,6 +166,10 @@ def _recognize_saved_draft(
     portrait_directory: str | None,
     *,
     picks_only: bool,
+    perspective: str | None,
+    position: str,
+    limit: int,
+    rank_tier: int | None,
 ) -> int:
     if not layout_path:
         print("--recognize-draft requires --layout <layout.json>", file=sys.stderr)
@@ -189,6 +215,35 @@ def _recognize_saved_draft(
     accepted = len(recognition.accepted_slots)
     unresolved = len(recognition.unresolved_slots)
     print(f"Accepted slots: {accepted}; manual/unresolved: {unresolved}")
+
+    # Keep the existing inspect-only workflow when --perspective is omitted.
+    # Supplying it closes the saved-frame MVP loop: recognized legal picks and
+    # bans are sanitized by draft_mvp and then sent to the same coach used by
+    # the manual CLI path.
+    if perspective is None:
+        return 0
+
+    try:
+        coached = coach_recognized_draft(
+            data,
+            recognition,
+            perspective,
+            position,
+            limit=limit,
+            rank_tier=rank_tier,
+        )
+    except ValueError as exc:
+        print(f"Coaching error: {exc}", file=sys.stderr)
+        return 2
+
+    recognized = coached.recognized
+    print(f"\nPerspective: {perspective}")
+    print("Recognized allies: " + (", ".join(hero.name for hero in recognized.allies) or "none"))
+    print("Recognized enemies: " + (", ".join(hero.name for hero in recognized.enemies) or "none"))
+    if recognized.ignored_bans:
+        banned_names = [slot.hero_name for slot in recognized.ignored_bans if slot.hero_name]
+        print("Recognized bans: " + (", ".join(banned_names) or "none"))
+    _print_coach_result(coached.coach)
     return 0
 
 
@@ -228,6 +283,11 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--layout", metavar="JSON", help="Measured DraftLayout JSON for --recognize-draft")
     parser.add_argument("--portraits", metavar="DIR", help="Prepared portrait reference directory for --recognize-draft")
     parser.add_argument("--picks-only", action="store_true", help="With --recognize-draft, skip ban slots")
+    parser.add_argument(
+        "--perspective",
+        choices=("radiant", "dire"),
+        help="With --recognize-draft, run Coach from this team's perspective after safe pick/ban sanitization",
+    )
     return parser
 
 
@@ -275,6 +335,10 @@ def main(argv: list[str] | None = None) -> int:
             args.layout,
             args.portraits,
             picks_only=args.picks_only,
+            perspective=args.perspective,
+            position=position,
+            limit=args.limit,
+            rank_tier=rank_tier,
         )
 
     try:
@@ -298,26 +362,7 @@ def main(argv: list[str] | None = None) -> int:
         print("Enemies: " + ", ".join(hero.name for hero in enemies))
 
     result = coach_draft(data, allies, enemies, position, args.limit, rank_tier)
-
-    print("\nRecommendations")
-    for index, pick in enumerate(result.picks, start=1):
-        print(f"{index}. {pick.hero}: score={pick.score:.2f}, confidence={pick.confidence:.0%}")
-        for reason in pick.reasons:
-            print(f"   - {reason}")
-
-    if result.warnings:
-        print("\nData warnings")
-        for warning in result.warnings:
-            print(f"- {warning}")
-
-    print("\nTactics")
-    for line in result.tactics:
-        print(f"- {line}")
-
-    print("\nData provenance")
-    for note in result.source_notes:
-        print(f"- {note}")
-
+    _print_coach_result(result)
     return 0
 
 
