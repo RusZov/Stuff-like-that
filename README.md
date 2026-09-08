@@ -2,7 +2,7 @@
 
 Clean restart of the project after removing the unreliable full-screen `cv2.matchTemplate` prototype.
 
-Current package version: **0.8.2**.
+Current package version: **0.8.3**.
 
 ## What works now
 
@@ -34,7 +34,8 @@ Current package version: **0.8.2**.
 - `coach_recognized_draft()` sanitizes duplicate/overfull pick claims before calling the legal-draft validator.
 - Confident valid ban slots are passed to the recommendation layer as exclusions; unresolved or stale bans stay manual and do not suppress candidates.
 - Low-confidence slots remain unresolved for manual fallback.
-- Synthetic regression tests cover aspect mismatch, blank slots, duplicate claims, brightness changes and class-margin ambiguity.
+- The saved-frame CLI can now continue from recognition into recommendations and tactics with `--perspective radiant|dire`; omitting `--perspective` preserves inspect-only recognition.
+- Synthetic regression tests cover aspect mismatch, blank slots, duplicate claims, brightness changes, class-margin ambiguity and the recognized-draft CLI bridge.
 
 ## Install
 
@@ -77,6 +78,38 @@ python -m dota_coach.cli --health
 
 The health command checks roster/meta coverage, medal buckets, portrait paths, all three lane-role samples and one live matchup matrix.
 
+## Saved-frame recognition -> Coach
+
+After preparing canonical portrait references and measuring a real `DraftLayout`, inspect a saved frame without coaching:
+
+```bash
+python -m dota_coach.cli \
+  --recognize-draft captures/draft.png \
+  --layout layouts/16x9.json \
+  --portraits portraits
+```
+
+To send only the safely accepted pick/ban claims into the same recommendation service used by the manual CLI, add the user's team perspective:
+
+```bash
+python -m dota_coach.cli \
+  --recognize-draft captures/draft.png \
+  --layout layouts/16x9.json \
+  --portraits portraits \
+  --perspective radiant \
+  --role mid \
+  --rank legend \
+  --limit 5
+```
+
+Unresolved slots remain manual. Duplicate, overfull and pick-vs-ban contradictions are reduced to the strongest legal visual claims before coaching; confidently recognized bans are excluded from recommendations.
+
 ## Exact Dota frame capture
 
 Windows only:
+
+```bash
+python -m dota_coach.cli --capture-draft captures/draft.png
+```
+
+The capture command targets the exact Dota HWND and is intended for current-HUD layout calibration. The remaining automatic-MVP blocker is real 16:9/16:10 draft imagery with measured pick/ban ROIs and HUD anchors; no guessed coordinates are committed.
