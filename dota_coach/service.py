@@ -7,6 +7,12 @@ from typing import Iterable
 from .data import DotaData, Hero, OPENDOTA_MATCHUP_WINDOW_DAYS
 from .engine import Pick, build_strategy, normalize_position, normalize_rank_tier, recommend, validate_draft
 
+# Matchup evidence is supplemental. A stalled optional endpoint must not make an
+# otherwise usable draft recommendation wait through the normal robust retry
+# budget that protects canonical roster/meta refreshes.
+OPTIONAL_MATCHUP_TIMEOUT_SECONDS = 3.0
+OPTIONAL_MATCHUP_ATTEMPTS = 1
+
 
 @dataclass(frozen=True)
 class DraftResult:
@@ -77,6 +83,54 @@ def _hero_names_for_ids(data: DotaData, hero_ids: Iterable[int] | None) -> set[s
     return names
 
 
+def _load_matchups_fail_fast(data: DotaData, enemies: list[Hero], warnings: list[str]) -> None:
+    """Load optional matchup rows without letting a degraded endpoint stall MVP UX.
+
+    The default HTTP client intentionally has a larger timeout/retry budget for
+    canonical Valve/OpenDota roster/meta refreshes. Matchups are only a weak
+    pro/league signal, so temporarily tighten that budget and stop the batch
+    after the first source failure. The client's normal policy is restored even
+    if a loader raises unexpectedly, and a later coach call may retry because
+    DotaData does not cache transient matchup failures.
+    """
+    matchup_loader = getattr(data, "load_enemy_matchups", None)
+    if not enemies or not callable(matchup_loader):
+        return
+
+    client = getattr(data, "client", None)
+    old_timeout = getattr(client, "timeout", None)
+    old_attempts = getattr(client, "attempts", None)
+    changed_timeout = isinstance(old_timeout, (int, float))
+    changed_attempts = isinstance(old_attempts, int)
+
+    if changed_timeout:
+        client.timeout = min(float(old_timeout), OPTIONAL_MATCHUP_TIMEOUT_SECONDS)
+    if changed_attempts:
+        client.attempts = min(int(old_attempts), OPTIONAL_MATCHUP_ATTEMPTS)
+
+    try:
+        for index, enemy in enumerate(enemies):
+            matchup_loader([enemy.id])
+            status = data.source_status.get(f"OpenDota matchups:{enemy.id}", "")
+            if not status.startswith("error:"):
+                continue
+
+            warnings.append(
+                f"matchup-данные для {enemy.name} недоступны; использованы только состав и мета"
+            )
+            remaining = len(enemies) - index - 1
+            if remaining > 0:
+                warnings.append(
+                    f"ещё {remaining} matchup-запрос(а/ов) пропущено после сбоя необязательного источника, чтобы не задерживать рекомендацию"
+                )
+            break
+    finally:
+        if changed_timeout:
+            client.timeout = old_timeout
+        if changed_attempts:
+            client.attempts = old_attempts
+
+
 def coach_draft(
     data: DotaData,
     allies: list[Hero],
@@ -109,13 +163,7 @@ def coach_draft(
             if status.startswith("error:"):
                 warnings.append(f"lane-role {lane} недоступен; позиционный score будет менее точным")
 
-    matchup_loader = getattr(data, "load_enemy_matchups", None)
-    if enemies and callable(matchup_loader):
-        matchup_loader([hero.id for hero in enemies])
-        for enemy in enemies:
-            status = data.source_status.get(f"OpenDota matchups:{enemy.id}", "")
-            if status.startswith("error:"):
-                warnings.append(f"matchup-данные для {enemy.name} недоступны; использованы только состав и мета")
+    _load_matchups_fail_fast(data, enemies, warnings)
 
     # Confidence calibration is candidate-specific and can legitimately reorder
     # close raw scores. Therefore calibrate the complete available candidate pool
