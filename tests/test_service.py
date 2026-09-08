@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from dota_coach.data import Hero
@@ -122,6 +123,28 @@ class DraftCoachServiceTests(unittest.TestCase):
         data = FailingData(self.heroes)
         result = coach_draft(data, [self.cm], [self.axe], "mid", 2)
         self.assertTrue(any("Axe" in warning for warning in result.warnings))
+        self.assertEqual(len(result.picks), 2)
+
+    def test_matchup_failure_uses_short_policy_stops_batch_and_restores_client(self):
+        class StallingData(ServiceData):
+            def __init__(self, heroes):
+                super().__init__(heroes)
+                self.client = SimpleNamespace(timeout=10.0, attempts=3)
+                self.observed_policies = []
+
+            def load_enemy_matchups(self, enemy_ids):
+                self.matchup_load_calls.append(tuple(enemy_ids))
+                self.observed_policies.append((self.client.timeout, self.client.attempts))
+                for enemy_id in enemy_ids:
+                    self.source_status[f"OpenDota matchups:{enemy_id}"] = "error: timeout"
+
+        data = StallingData(self.heroes)
+        result = coach_draft(data, [self.cm], [self.axe, self.puck], "mid", 2)
+
+        self.assertEqual(data.matchup_load_calls, [(self.axe.id,)])
+        self.assertEqual(data.observed_policies, [(3.0, 1)])
+        self.assertEqual((data.client.timeout, data.client.attempts), (10.0, 3))
+        self.assertTrue(any("пропущено" in warning for warning in result.warnings))
         self.assertEqual(len(result.picks), 2)
 
 
