@@ -25,6 +25,8 @@ Current package version: **0.8.3**.
 - Captures the **exact Dota window HWND** on Windows through Windows Graphics Capture; the whole desktop is not scanned.
 - Saves exact-window PNG frames with `--capture-draft` for layout calibration.
 - `DraftLayout` stores normalized pick/ban rectangles, team labels, aspect-ratio guards and optional anchors. There are no guessed real Dota coordinates in the repository.
+- `DraftAnchorProfile` stores calibrated descriptors for already-measured fixed HUD anchor ROIs. Validation never performs a sliding/full-screen search.
+- Automatic saved-frame coaching is fail-closed: `--perspective` requires `--anchor-profile`, and a rejected HUD frame is stopped before the portrait index or hero classifier is used.
 - OpenDota `Hero.img` / `Hero.icon` paths are preserved. Live health currently verifies portrait-path coverage across the roster.
 - `PortraitIndex` builds a compact image embedding from an already-cropped portrait ROI using chroma, normalized luminance structure and edge energy. It does **not** slide a template over the frame.
 - Recognition checks absolute likeness **and** the margin to the second-best hero, so ambiguous crops fail closed.
@@ -34,8 +36,8 @@ Current package version: **0.8.3**.
 - `coach_recognized_draft()` sanitizes duplicate/overfull pick claims before calling the legal-draft validator.
 - Confident valid ban slots are passed to the recommendation layer as exclusions; unresolved or stale bans stay manual and do not suppress candidates.
 - Low-confidence slots remain unresolved for manual fallback.
-- The saved-frame CLI can now continue from recognition into recommendations and tactics with `--perspective radiant|dire`; omitting `--perspective` preserves inspect-only recognition.
-- Synthetic regression tests cover aspect mismatch, blank slots, duplicate claims, brightness changes, class-margin ambiguity and the recognized-draft CLI bridge.
+- The saved-frame CLI can continue from validated recognition into recommendations and tactics with `--perspective radiant|dire`; omitting `--perspective` preserves inspect-only recognition for calibration/debugging.
+- Synthetic regression tests cover aspect mismatch, blank slots, duplicate claims, brightness changes, class-margin ambiguity, HUD rejection and the recognized-draft CLI bridge.
 
 ## Install
 
@@ -89,18 +91,23 @@ python -m dota_coach.cli \
   --portraits portraits
 ```
 
-To send only the safely accepted pick/ban claims into the same recommendation service used by the manual CLI, add the user's team perspective:
+Inspect-only mode may omit the anchor profile while calibrating a new layout. Once an anchor profile exists, it can also be supplied to inspect validation evidence without starting Coach.
+
+To send only the safely accepted pick/ban claims into the same recommendation service used by the manual CLI, a calibrated HUD profile is mandatory:
 
 ```bash
 python -m dota_coach.cli \
   --recognize-draft captures/draft.png \
   --layout layouts/16x9.json \
+  --anchor-profile layouts/16x9.anchors.json \
   --portraits portraits \
   --perspective radiant \
   --role mid \
   --rank legend \
   --limit 5
 ```
+
+The order is deliberately fail-closed: `load layout/profile -> validate fixed HUD anchors -> build portrait index -> recognize exact slot crops -> sanitize legal picks/bans -> Coach`. If HUD validation fails, portrait classification and automatic coaching are not attempted.
 
 Unresolved slots remain manual. Duplicate, overfull and pick-vs-ban contradictions are reduced to the strongest legal visual claims before coaching; confidently recognized bans are excluded from recommendations.
 
