@@ -15,6 +15,7 @@ from .data import (
 from .draft_layout import LayoutError, load_layout
 from .draft_mvp import coach_recognized_draft
 from .draft_recognition import recognize_draft_slots
+from .draft_validation import DraftValidationError, load_anchor_profile, validate_draft_frame
 from .engine import normalize_position, normalize_rank_tier, validate_draft
 from .portrait import (
     PortraitDependencyError,
@@ -165,6 +166,7 @@ def _recognize_saved_draft(
     layout_path: str | None,
     portrait_directory: str | None,
     *,
+    anchor_profile_path: str | None = None,
     picks_only: bool,
     perspective: str | None,
     position: str,
@@ -177,9 +179,32 @@ def _recognize_saved_draft(
     if not portrait_directory:
         print("--recognize-draft requires --portraits <directory>", file=sys.stderr)
         return 2
+    if perspective is not None and not anchor_profile_path:
+        print(
+            "--perspective requires --anchor-profile <profile.json>; Coach will not trust an unvalidated draft frame",
+            file=sys.stderr,
+        )
+        return 2
 
     try:
         layout = load_layout(layout_path)
+
+        if anchor_profile_path:
+            profile = load_anchor_profile(anchor_profile_path)
+            validation = validate_draft_frame(frame_path, layout, profile)
+            print(
+                f"HUD validation: {validation.passed_anchors}/{validation.required_anchors} required anchors matched "
+                f"-> {'accepted' if validation.accepted else 'rejected'}"
+            )
+            if not validation.accepted:
+                for item in validation.evidence:
+                    print(
+                        f"Anchor {item.index}: similarity={item.similarity:.3f} "
+                        f"-> {'matched' if item.passed else 'failed'} ({item.reason})"
+                    )
+                print(f"Recognition refused: {validation.reason}", file=sys.stderr)
+                return 10
+
         index = PortraitIndex.from_directory(data.heroes.values(), portrait_directory)
         required = _minimum_portrait_coverage(data)
         if index.hero_count < required:
@@ -195,7 +220,13 @@ def _recognize_saved_draft(
             index,
             include_bans=not picks_only,
         )
-    except (LayoutError, PortraitDependencyError, PortraitIndexError, OSError) as exc:
+    except (
+        LayoutError,
+        DraftValidationError,
+        PortraitDependencyError,
+        PortraitIndexError,
+        OSError,
+    ) as exc:
         print(f"Recognition error: {exc}", file=sys.stderr)
         return 9
 
@@ -216,10 +247,6 @@ def _recognize_saved_draft(
     unresolved = len(recognition.unresolved_slots)
     print(f"Accepted slots: {accepted}; manual/unresolved: {unresolved}")
 
-    # Keep the existing inspect-only workflow when --perspective is omitted.
-    # Supplying it closes the saved-frame MVP loop: recognized legal picks and
-    # bans are sanitized by draft_mvp and then sent to the same coach used by
-    # the manual CLI path.
     if perspective is None:
         return 0
 
@@ -282,11 +309,16 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--capture-timeout", type=float, default=3.0, help="Seconds to wait for a captured Dota frame")
     parser.add_argument("--layout", metavar="JSON", help="Measured DraftLayout JSON for --recognize-draft")
     parser.add_argument("--portraits", metavar="DIR", help="Prepared portrait reference directory for --recognize-draft")
+    parser.add_argument(
+        "--anchor-profile",
+        metavar="JSON",
+        help="Calibrated DraftAnchorProfile used to validate the saved frame before recognition; required with --perspective",
+    )
     parser.add_argument("--picks-only", action="store_true", help="With --recognize-draft, skip ban slots")
     parser.add_argument(
         "--perspective",
         choices=("radiant", "dire"),
-        help="With --recognize-draft, run Coach from this team's perspective after safe pick/ban sanitization",
+        help="With --recognize-draft, run Coach from this team's perspective after HUD validation and safe pick/ban sanitization",
     )
     return parser
 
@@ -334,6 +366,7 @@ def main(argv: list[str] | None = None) -> int:
             args.recognize_draft,
             args.layout,
             args.portraits,
+            anchor_profile_path=args.anchor_profile,
             picks_only=args.picks_only,
             perspective=args.perspective,
             position=position,
