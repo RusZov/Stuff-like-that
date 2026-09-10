@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
 import json
 from math import ceil
 from pathlib import Path
@@ -30,9 +31,27 @@ class AnchorEvidence:
     reason: str
 
 
+def _layout_fingerprint(layout: DraftLayout) -> str:
+    """Return a stable signature for all geometry/semantics used after HUD validation.
+
+    A profile must be bound to more than a human-readable layout name. Otherwise a
+    stale layout with the same name and anchor count can validate the HUD while using
+    different pick/ban ROIs for recognition. Canonical JSON keeps the signature stable
+    across save/load round trips while covering aspect bounds, slots and anchors.
+    """
+    payload = json.dumps(
+        layout.to_dict(),
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return sha256(payload).hexdigest()
+
+
 @dataclass(frozen=True)
 class DraftAnchorProfile:
     layout_name: str
+    layout_fingerprint: str
     reference_width: int
     reference_height: int
     features: tuple[tuple[float, ...], ...]
@@ -42,6 +61,10 @@ class DraftAnchorProfile:
     def __post_init__(self) -> None:
         if not self.layout_name.strip():
             raise DraftValidationError("anchor profile layout_name must not be empty")
+        if len(self.layout_fingerprint) != 64 or any(
+            char not in "0123456789abcdef" for char in self.layout_fingerprint.lower()
+        ):
+            raise DraftValidationError("anchor profile layout_fingerprint must be a SHA-256 hex digest")
         if self.reference_width <= 0 or self.reference_height <= 0:
             raise DraftValidationError("anchor profile reference dimensions must be positive")
         if len(self.features) < 2:
@@ -57,6 +80,7 @@ class DraftAnchorProfile:
     def to_dict(self) -> dict[str, Any]:
         return {
             "layout_name": self.layout_name,
+            "layout_fingerprint": self.layout_fingerprint,
             "reference_width": self.reference_width,
             "reference_height": self.reference_height,
             "features": [[round(float(value), 7) for value in feature] for feature in self.features],
@@ -76,6 +100,7 @@ class DraftAnchorProfile:
             features = tuple(tuple(float(item) for item in feature) for feature in raw_features)
             return cls(
                 layout_name=str(value["layout_name"]),
+                layout_fingerprint=str(value["layout_fingerprint"]).lower(),
                 reference_width=int(value["reference_width"]),
                 reference_height=int(value["reference_height"]),
                 features=features,
@@ -146,6 +171,7 @@ def calibrate_anchor_profile(
 
     return DraftAnchorProfile(
         layout_name=layout.name,
+        layout_fingerprint=_layout_fingerprint(layout),
         reference_width=width,
         reference_height=height,
         features=tuple(features),
@@ -164,6 +190,8 @@ def validate_draft_frame(
         raise DraftValidationError(
             f"anchor profile is for {profile.layout_name!r}, not layout {layout.name!r}"
         )
+    if profile.layout_fingerprint != _layout_fingerprint(layout):
+        raise DraftValidationError("anchor profile does not match the exact DraftLayout geometry")
     if len(profile.features) != len(layout.anchors):
         raise DraftValidationError("anchor profile count does not match DraftLayout anchors")
 
