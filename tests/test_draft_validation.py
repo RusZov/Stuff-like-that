@@ -4,7 +4,7 @@ import unittest
 
 from PIL import Image, ImageDraw, ImageEnhance
 
-from dota_coach.draft_layout import DraftLayout, NormalizedRect
+from dota_coach.draft_layout import DraftLayout, NormalizedRect, SlotRegion
 from dota_coach.draft_validation import (
     DraftAnchorProfile,
     DraftValidationError,
@@ -57,6 +57,28 @@ class DraftValidationTests(unittest.TestCase):
         self.assertEqual(result.passed_anchors, 3)
         self.assertEqual(result.required_anchors, 3)
         self.assertTrue(all(item.similarity > 0.99 for item in result.evidence))
+
+    def test_profile_is_bound_to_exact_layout_geometry(self) -> None:
+        layout = _layout()
+        frame = _reference_frame()
+        profile = calibrate_anchor_profile(frame, layout)
+        changed_layout = DraftLayout(
+            name=layout.name,
+            aspect_min=layout.aspect_min,
+            aspect_max=layout.aspect_max,
+            slots=(
+                SlotRegion(
+                    slot_id="radiant_pick_1",
+                    kind="pick",
+                    team="radiant",
+                    rect=NormalizedRect(0.20, 0.30, 0.10, 0.10),
+                ),
+            ),
+            anchors=layout.anchors,
+        )
+
+        with self.assertRaisesRegex(DraftValidationError, "exact DraftLayout geometry"):
+            validate_draft_frame(frame, changed_layout, profile)
 
     def test_brightness_shift_keeps_fixed_anchor_evidence(self) -> None:
         layout = _layout()
