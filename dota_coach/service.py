@@ -110,7 +110,23 @@ def _load_matchups_fail_fast(data: DotaData, enemies: list[Hero], warnings: list
 
     try:
         for index, enemy in enumerate(enemies):
-            matchup_loader([enemy.id])
+            try:
+                matchup_loader([enemy.id])
+            except Exception:
+                # Matchups are optional evidence. A parser/network regression in
+                # this weak source must degrade the recommendation, not crash the
+                # whole draft assistant. Stop the batch and keep the core meta,
+                # lane-role and composition signals available to the user.
+                warnings.append(
+                    f"matchup-данные для {enemy.name} недоступны; использованы только состав и мета"
+                )
+                remaining = len(enemies) - index - 1
+                if remaining > 0:
+                    warnings.append(
+                        f"ещё {remaining} matchup-запрос(а/ов) пропущено после сбоя необязательного источника, чтобы не задерживать рекомендацию"
+                    )
+                break
+
             status = data.source_status.get(f"OpenDota matchups:{enemy.id}", "")
             if not status.startswith("error:"):
                 continue
