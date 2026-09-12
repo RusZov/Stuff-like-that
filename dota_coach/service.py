@@ -22,6 +22,23 @@ class DraftResult:
     source_notes: tuple[str, ...]
 
 
+class _LanePreloadedData:
+    """Delegate to DotaData while suppressing recommend()'s second lane fetch.
+
+    ``coach_draft`` owns optional-source loading so it can surface warnings. The
+    lower-level ``recommend`` helper also supports standalone callers by loading
+    lane roles itself. Passing this tiny proxy prevents a failed/slow OpenDota
+    lane-role request from being retried immediately in the same coaching call.
+    """
+
+    def __init__(self, data: DotaData) -> None:
+        self._data = data
+        self.load_lane_roles = None
+
+    def __getattr__(self, name: str):
+        return getattr(self._data, name)
+
+
 def _role_counts(heroes: list[Hero]) -> Counter[str]:
     counts: Counter[str] = Counter()
     for hero in heroes:
@@ -81,6 +98,30 @@ def _hero_names_for_ids(data: DotaData, hero_ids: Iterable[int] | None) -> set[s
         if hero.id in wanted:
             names.add(hero.name)
     return names
+
+
+def _load_lane_roles_once(data: DotaData, warnings: list[str]) -> None:
+    """Load optional lane-role evidence once and degrade cleanly on failure.
+
+    DotaData normally converts network/parser failures into ``source_status``.
+    The extra exception guard protects the interactive MVP from an unexpected
+    regression in this supplemental source. Either way, ``coach_draft`` will
+    pass a proxy to ``recommend`` so the same request is not retried immediately.
+    """
+    lane_loader = getattr(data, "load_lane_roles", None)
+    if not callable(lane_loader):
+        return
+
+    try:
+        lane_loader([1, 2, 3])
+    except Exception:
+        warnings.append("lane-role данные недоступны; позиционный score построен без этого дополнительного сигнала")
+        return
+
+    for lane in (1, 2, 3):
+        status = data.source_status.get(f"OpenDota lane role:{lane}", "")
+        if status.startswith("error:"):
+            warnings.append(f"lane-role {lane} недоступен; позиционный score будет менее точным")
 
 
 def _load_matchups_fail_fast(data: DotaData, enemies: list[Hero], warnings: list[str]) -> None:
@@ -171,14 +212,7 @@ def coach_draft(
 
     warnings: list[str] = []
 
-    lane_loader = getattr(data, "load_lane_roles", None)
-    if callable(lane_loader):
-        lane_loader([1, 2, 3])
-        for lane in (1, 2, 3):
-            status = data.source_status.get(f"OpenDota lane role:{lane}", "")
-            if status.startswith("error:"):
-                warnings.append(f"lane-role {lane} недоступен; позиционный score будет менее точным")
-
+    _load_lane_roles_once(data, warnings)
     _load_matchups_fail_fast(data, enemies, warnings)
 
     # Confidence calibration is candidate-specific and can legitimately reorder
@@ -187,7 +221,10 @@ def coach_draft(
     # better high-confidence pick just below the raw-score boundary.
     hero_count = len(getattr(data, "heroes", {}))
     pool_limit = max(limit, hero_count)
-    raw = recommend(data, allies, enemies, position, limit=pool_limit, rank_tier=rank_tier)
+    # ``recommend`` supports standalone usage and normally preloads lane roles.
+    # They were already attempted above, so suppress that second call here. This
+    # is especially important when the optional endpoint is slow or unavailable.
+    raw = recommend(_LanePreloadedData(data), allies, enemies, position, limit=pool_limit, rank_tier=rank_tier)
     if excluded_names:
         raw = [pick for pick in raw if pick.hero not in excluded_names]
     picks = sorted((_calibrate_pick(pick) for pick in raw), key=lambda p: (-p.score, -p.confidence, p.hero))[:limit]
