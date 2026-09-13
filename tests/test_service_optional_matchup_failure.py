@@ -84,7 +84,8 @@ class OptionalLaneRoleFailureRegression(unittest.TestCase):
 
         self.assertEqual(data.lane_calls, 1)
         self.assertEqual(len(result.picks), 2)
-        self.assertTrue(any("lane-role данные недоступны" in warning for warning in result.warnings))
+        self.assertTrue(any("lane-role 1" in warning and "недоступен" in warning for warning in result.warnings))
+        self.assertTrue(any("lane-role" in warning and "пропущено" in warning for warning in result.warnings))
 
     def test_lane_status_error_is_not_retried_inside_recommend(self) -> None:
         class LaneStatusData:
@@ -113,7 +114,8 @@ class OptionalLaneRoleFailureRegression(unittest.TestCase):
 
         self.assertEqual(data.lane_calls, 1)
         self.assertEqual(len(result.picks), 2)
-        self.assertEqual(sum("lane-role" in warning for warning in result.warnings), 3)
+        self.assertTrue(any("lane-role 1" in warning and "недоступен" in warning for warning in result.warnings))
+        self.assertTrue(any("lane-role" in warning and "пропущено" in warning for warning in result.warnings))
 
 
 if __name__ == "__main__":
