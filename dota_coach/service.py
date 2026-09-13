@@ -7,9 +7,10 @@ from typing import Iterable
 from .data import DotaData, Hero, OPENDOTA_MATCHUP_WINDOW_DAYS
 from .engine import Pick, build_strategy, normalize_position, normalize_rank_tier, recommend, validate_draft
 
-# Matchup evidence is supplemental. A stalled optional endpoint must not make an
-# otherwise usable draft recommendation wait through the normal robust retry
-# budget that protects canonical roster/meta refreshes.
+# Supplemental OpenDota endpoints must not make an interactive draft recommendation
+# wait through the larger retry budget reserved for canonical roster/meta refreshes.
+OPTIONAL_LANE_TIMEOUT_SECONDS = 3.0
+OPTIONAL_LANE_ATTEMPTS = 1
 OPTIONAL_MATCHUP_TIMEOUT_SECONDS = 3.0
 OPTIONAL_MATCHUP_ATTEMPTS = 1
 
@@ -101,27 +102,62 @@ def _hero_names_for_ids(data: DotaData, hero_ids: Iterable[int] | None) -> set[s
 
 
 def _load_lane_roles_once(data: DotaData, warnings: list[str]) -> None:
-    """Load optional lane-role evidence once and degrade cleanly on failure.
+    """Load optional lane-role evidence once with an interactive fail-fast budget.
 
-    DotaData normally converts network/parser failures into ``source_status``.
-    The extra exception guard protects the interactive MVP from an unexpected
-    regression in this supplemental source. Either way, ``coach_draft`` will
-    pass a proxy to ``recommend`` so the same request is not retried immediately.
+    ``DotaData.load_lane_roles`` is intentionally resilient for general callers and
+    normally uses the client's larger timeout/retry policy. During a live draft this
+    source is supplemental, so query one lane at a time under a short single-attempt
+    policy and stop the batch on the first failure. The client's normal policy is
+    restored in all cases. ``coach_draft`` then passes a proxy to ``recommend`` so a
+    failed lane request is not immediately retried in the same recommendation.
     """
     lane_loader = getattr(data, "load_lane_roles", None)
     if not callable(lane_loader):
         return
 
-    try:
-        lane_loader([1, 2, 3])
-    except Exception:
-        warnings.append("lane-role данные недоступны; позиционный score построен без этого дополнительного сигнала")
-        return
+    client = getattr(data, "client", None)
+    old_timeout = getattr(client, "timeout", None)
+    old_attempts = getattr(client, "attempts", None)
+    changed_timeout = isinstance(old_timeout, (int, float))
+    changed_attempts = isinstance(old_attempts, int)
 
-    for lane in (1, 2, 3):
-        status = data.source_status.get(f"OpenDota lane role:{lane}", "")
-        if status.startswith("error:"):
+    if changed_timeout:
+        client.timeout = min(float(old_timeout), OPTIONAL_LANE_TIMEOUT_SECONDS)
+    if changed_attempts:
+        client.attempts = min(int(old_attempts), OPTIONAL_LANE_ATTEMPTS)
+
+    try:
+        lanes = (1, 2, 3)
+        for index, lane in enumerate(lanes):
+            try:
+                lane_loader([lane])
+            except Exception:
+                warnings.append(
+                    f"lane-role {lane} недоступен; позиционный score построен без полного lane-role сигнала"
+                )
+                remaining = len(lanes) - index - 1
+                if remaining > 0:
+                    warnings.append(
+                        f"ещё {remaining} lane-role запрос(а/ов) пропущено после сбоя необязательного источника, чтобы не задерживать рекомендацию"
+                    )
+                break
+
+            status = data.source_status.get(f"OpenDota lane role:{lane}", "")
+            if not status.startswith("error:"):
+                continue
+
             warnings.append(f"lane-role {lane} недоступен; позиционный score будет менее точным")
+            remaining = len(lanes) - index - 1
+            if remaining > 0:
+                warnings.append(
+                    f"ещё {remaining} lane-role запрос(а/ов) пропущено после сбоя необязательного источника, чтобы не задерживать рекомендацию"
+                )
+            break
+    finally:
+        if changed_timeout:
+            client.timeout = old_timeout
+        if changed_attempts:
+            client.attempts = old_attempts
 
 
 def _load_matchups_fail_fast(data: DotaData, enemies: list[Hero], warnings: list[str]) -> None:
